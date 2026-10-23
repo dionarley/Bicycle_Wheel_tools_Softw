@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wheel-lab"
+version = "0.1.0"
+description = "Ferramentas de cálculo, montagem e alinhamento de rodas de bicicleta"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.6",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+wheel-lab = "wheel_builder_qt:main"
+
+[tool.setuptools]
+py-modules = ["wheel_builder_qt"]
+
+[tool.setuptools.packages.find]
+include = ["wheel_lab*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
