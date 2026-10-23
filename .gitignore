@@ -1,0 +1,15 @@
+# Ambiente virtual e caches
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# PDF de referência (obra protegida por direitos autorais; não versionar)
+Bicycle_Wheel_-_Jobst_Brandt.pdf
+
+# Editores
+.idea/
+.vscode/
+*.swp
