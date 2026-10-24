@@ -69,3 +69,66 @@ def test_spoke_count_adjusts_invalid_crossing(qt_app):
     window.spokes_count_combo.setCurrentText("28")
     assert window.cross_combo.currentData() == 3
     window.close()
+
+
+def test_dish_updates_lengths_and_centering_view(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.dish_input.setText("2.0")
+    window.calculate_spokes()
+
+    sheet = window.last_sheet
+    assert sheet is not None
+    assert sheet.spec.effective_left_offset_mm == 37.0
+    assert sheet.spec.effective_right_offset_mm == 17.0
+    assert "esquerda" in sheet.centering_action
+    assert "CENTRALIZAÇÃO" in window.info_text.toPlainText()
+    assert window.centering_view.spec is sheet.spec
+
+    window.centering_view.resize(420, 280)
+    window.centering_view.grab()
+    window.close()
+
+
+def test_build_sheet_preview_and_pdf(qt_app, tmp_path):
+    if appmod.QPrinter is None:
+        pytest.skip("QtPrintSupport indisponível")
+
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    sheet = window.last_sheet
+    assert sheet is not None
+    assert "Ficha de montagem" in window.sheet_preview.toPlainText()
+
+    pdf_path = tmp_path / "ficha.pdf"
+    window._write_pdf(sheet, str(pdf_path))
+    assert pdf_path.exists()
+    assert pdf_path.stat().st_size > 1000
+    window.close()
+
+
+def test_visibility_flags_and_selected_spoke(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+
+    window.show_left_cb.setChecked(False)
+    assert window.visualizer.show_left is False
+    window.show_left_cb.setChecked(True)
+    assert window.visualizer.show_left is True
+
+    window.sim_spoke_idx.setText("5")
+    assert window.visualizer.selected_index == 5
+    window.sim_spoke_idx.setText("99")
+    assert window.visualizer.selected_index is None
+
+    window.visualizer.resize(420, 420)
+    window.visualizer.grab()
+    window.close()
+
+
+def test_locknut_spacing_is_optional(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.locknut_input.setText("")
+    window.calculate_spokes()
+    assert window.last_sheet is not None
+    assert window.last_sheet.spec.locknut_spacing_mm is None
+    window.close()

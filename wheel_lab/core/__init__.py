@@ -5,6 +5,7 @@ dataclasses, validações e fórmulas. Isso permite testar a engenharia da roda
 sem abrir uma janela.
 """
 
+from .build_sheet import BuildSheet, create_build_sheet
 from .geometry import (
     erd_from_outer_diameter,
     is_valid_cross_pattern,
@@ -51,6 +52,7 @@ __all__ = [
     "QUARTER_TURN_MM",
     "SPOKE_THREADS_PER_INCH",
     "SPOKE_THREAD_PITCH_MM",
+    "BuildSheet",
     "Side",
     "Spoke",
     "SpokeDirection",
@@ -58,6 +60,7 @@ __all__ = [
     "WheelSpec",
     "build_spoke_table",
     "calculate_spoke_lengths",
+    "create_build_sheet",
     "erd_from_outer_diameter",
     "inch_to_mm",
     "is_valid_cross_pattern",

@@ -67,7 +67,7 @@ def calculate_spoke_lengths(spec: WheelSpec) -> SpokeLengthResult:
     left = spoke_length_mm(
         spec.erd_mm,
         spec.left_flange_diameter_mm,
-        spec.left_flange_offset_mm,
+        spec.effective_left_offset_mm,
         spec.hole_diameter_mm,
         spec.spoke_count,
         spec.crossings,
@@ -75,7 +75,7 @@ def calculate_spoke_lengths(spec: WheelSpec) -> SpokeLengthResult:
     right = spoke_length_mm(
         spec.erd_mm,
         spec.right_flange_diameter_mm,
-        spec.right_flange_offset_mm,
+        spec.effective_right_offset_mm,
         spec.hole_diameter_mm,
         spec.spoke_count,
         spec.crossings,

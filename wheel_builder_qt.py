@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Wheel Lab — calculador e alinhador de rodas de bicicleta.
 
-Fase 0: núcleo de cálculo testável + UI PySide6 sem os crashes do protótipo.
-O simulador de alinhamento ainda é didático; o solver físico (aro + raios)
-entra na Fase 2.
+Fase 1: calculadora completa, visualizador de montagem, dish/centralização e
+ficha de montagem (JSON, Markdown e PDF). O simulador de alinhamento ainda é
+didático; o solver físico (aro + raios) entra na Fase 2.
 """
 
 from __future__ import annotations
@@ -12,10 +12,19 @@ import math
 import sys
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QFontDatabase, QPainter, QPen
+from PySide6.QtGui import (
+    QColor,
+    QFont,
+    QFontDatabase,
+    QPainter,
+    QPen,
+    QTextDocument,
+)
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -33,21 +42,21 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+try:
+    from PySide6.QtPrintSupport import QPrinter
+except ImportError:  # pragma: no cover - depende da instalação do PySide6
+    QPrinter = None  # type: ignore[assignment]
+
 from wheel_lab.core import (
+    BuildSheet,
     Side,
     SpokeDirection,
     WheelSpec,
     build_spoke_table,
-    calculate_spoke_lengths,
+    create_build_sheet,
     erd_from_outer_diameter,
     is_valid_cross_pattern,
-    lateral_tension_ratio,
-    linear_density_kg_per_m,
     max_crossings,
-    rim_compression_from_sides,
-    spoke_elongation_mm,
-    target_tensions,
-    tone_frequency_hz,
     turns_to_mm,
 )
 
@@ -74,6 +83,11 @@ class WheelVisualizer(QWidget):
         self.radial_offsets: list[float] = []
         self.spokes = []
         self.error_message = ""
+        self.show_left = True
+        self.show_right = True
+        self.show_leading = True
+        self.show_trailing = True
+        self.selected_index: int | None = None
         self.setMinimumSize(360, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -105,7 +119,46 @@ class WheelVisualizer(QWidget):
             self.spokes = []
             self.error_message = str(exc)
 
+        if self.selected_index is not None and self.selected_index >= len(self.spokes):
+            self.selected_index = None
         self.update()
+
+    def set_visibility(
+        self,
+        show_left: bool,
+        show_right: bool,
+        show_leading: bool,
+        show_trailing: bool,
+    ) -> None:
+        """Mostra ou esconde raios por lado e por sentido."""
+        self.show_left = bool(show_left)
+        self.show_right = bool(show_right)
+        self.show_leading = bool(show_leading)
+        self.show_trailing = bool(show_trailing)
+        self.update()
+
+    def set_selected_index(self, index: int | None) -> None:
+        """Destaca um raio pelo índice; ``None`` remove o destaque."""
+        if index is None:
+            self.selected_index = None
+        else:
+            try:
+                value = int(index)
+            except (TypeError, ValueError):
+                value = -1
+            self.selected_index = value if 0 <= value < len(self.spokes) else None
+        self.update()
+
+    def _spoke_visible(self, spoke) -> bool:
+        if spoke.side is Side.LEFT and not self.show_left:
+            return False
+        if spoke.side is Side.RIGHT and not self.show_right:
+            return False
+        if spoke.direction is SpokeDirection.LEADING and not self.show_leading:
+            return False
+        if spoke.direction is SpokeDirection.TRAILING and not self.show_trailing:
+            return False
+        return True
 
     @staticmethod
     def _fit(values: list[float], size: int) -> list[float]:
@@ -172,31 +225,29 @@ class WheelVisualizer(QWidget):
                     rim_points[(index + 1) % self.spoke_count],
                 )
 
-            # Raios.
+            # Raios. O selecionado é desenhado por último, para ficar no topo.
             hub_radius = base_radius * 0.18
+            selected = self.selected_index
             for index, spoke in enumerate(self.spokes):
-                hub_angle = math.radians(spoke.hub_angle_deg)
-                hub_point = QPointF(
-                    center.x() + hub_radius * math.cos(hub_angle),
-                    center.y() + hub_radius * math.sin(hub_angle),
+                if not self._spoke_visible(spoke) or index == selected:
+                    continue
+                self._draw_spoke(
+                    painter, index, spoke, rim_points, center, hub_radius
                 )
-                color = (
-                    QColor(55, 105, 220)
-                    if spoke.side is Side.LEFT
-                    else QColor(220, 65, 60)
+            if (
+                selected is not None
+                and 0 <= selected < len(self.spokes)
+                and self._spoke_visible(self.spokes[selected])
+            ):
+                self._draw_spoke(
+                    painter,
+                    selected,
+                    self.spokes[selected],
+                    rim_points,
+                    center,
+                    hub_radius,
+                    selected=True,
                 )
-                if spoke.direction is SpokeDirection.TRAILING:
-                    color = color.darker(130)
-                width = 2.2 if spoke.is_leading else 1.3
-                painter.setPen(
-                    QPen(
-                        color,
-                        width,
-                        Qt.PenStyle.SolidLine,
-                        Qt.PenCapStyle.RoundCap,
-                    )
-                )
-                painter.drawLine(hub_point, rim_points[index])
 
             # Cubo.
             painter.setPen(QPen(QColor(70, 70, 70), 1.5))
@@ -239,17 +290,79 @@ class WheelVisualizer(QWidget):
             message,
         )
 
+    def _draw_spoke(
+        self,
+        painter: QPainter,
+        index: int,
+        spoke,
+        rim_points: list[QPointF],
+        center: QPointF,
+        hub_radius: float,
+        selected: bool = False,
+    ) -> None:
+        hub_angle = math.radians(spoke.hub_angle_deg)
+        hub_point = QPointF(
+            center.x() + hub_radius * math.cos(hub_angle),
+            center.y() + hub_radius * math.sin(hub_angle),
+        )
+        rim_point = rim_points[index]
+
+        if selected:
+            painter.setPen(
+                QPen(
+                    QColor(255, 190, 0),
+                    7.0,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                )
+            )
+            painter.drawLine(hub_point, rim_point)
+
+        color = (
+            QColor(55, 105, 220)
+            if spoke.side is Side.LEFT
+            else QColor(220, 65, 60)
+        )
+        if spoke.direction is SpokeDirection.TRAILING:
+            color = color.darker(130)
+        width = 2.2 if spoke.is_leading else 1.3
+        if selected:
+            color = QColor(255, 215, 45)
+            width = 3.0
+        painter.setPen(
+            QPen(
+                color,
+                width,
+                Qt.PenStyle.SolidLine,
+                Qt.PenCapStyle.RoundCap,
+            )
+        )
+        painter.drawLine(hub_point, rim_point)
+
+        if selected:
+            painter.setBrush(QColor(255, 215, 45))
+            painter.setPen(QPen(QColor(40, 40, 40), 1.2))
+            painter.drawEllipse(rim_point, 5.5, 5.5)
+            painter.setFont(QFont("Sans", 8))
+            painter.setPen(QColor(30, 30, 30))
+            painter.drawText(
+                QRectF(rim_point.x() - 32, rim_point.y() - 24, 64, 16),
+                Qt.AlignmentFlag.AlignCenter,
+                f"raio {index}",
+            )
+
     def _draw_legend(self, painter: QPainter) -> None:
         legend = (
-            "Raios: azul = esquerda, vermelho = direita\n"
+            f"Raios: azul = esquerda, vermelho = direita\n"
             "Claro = leading, escuro = trailing\n"
+            "Amarelo = raio selecionado\n"
             "Aro: azul = desvio p/ esquerda, vermelho = p/ direita\n"
             f"Deslocamentos exagerados {EXAGGERATION:.0f}×"
         )
         painter.setPen(QColor(70, 70, 70))
         painter.setFont(QFont("Sans", 8))
         painter.drawText(
-            QRectF(8, self.height() - 78, self.width() - 16, 70),
+            QRectF(8, self.height() - 94, self.width() - 16, 86),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             legend,
         )
@@ -267,6 +380,313 @@ class WheelVisualizer(QWidget):
         return color
 
 
+class CenteringView(QWidget):
+    """Corte axial esquemático: aro, flanges, locknuts e dish."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.spec: WheelSpec | None = None
+        self.setMinimumSize(360, 260)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+
+    def sizeHint(self) -> QSize:
+        return QSize(440, 300)
+
+    def set_spec(self, spec: WheelSpec | None) -> None:
+        self.spec = spec
+        self.update()
+
+    def paintEvent(self, event) -> None:  # noqa: N802 (API do Qt)
+        painter = QPainter(self)
+        try:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+            painter.fillRect(self.rect(), QColor(250, 250, 252))
+
+            if self.spec is None:
+                self._draw_message(
+                    painter,
+                    "Calcule os comprimentos para ver o corte e a centralização.",
+                )
+                return
+
+            spec = self.spec
+            width = self.width()
+            height = self.height()
+            margin = 50.0
+            plot_top = 44.0
+            plot_bottom = height - 62.0
+            center_y = (plot_top + plot_bottom) / 2.0
+
+            hub_center = spec.hub_center_mm
+            flange_left = hub_center - spec.left_flange_offset_mm
+            flange_right = hub_center + spec.right_flange_offset_mm
+            locknuts = spec.locknut_positions_mm()
+
+            positions = [0.0, flange_left, flange_right]
+            if locknuts:
+                positions.extend(locknuts)
+            min_x = min(positions)
+            max_x = max(positions)
+            span = max(max_x - min_x, 1.0)
+            min_x -= span * 0.12
+            max_x += span * 0.12
+            span = max(max_x - min_x, 1.0)
+
+            def screen_x(value: float) -> float:
+                return margin + (value - min_x) / span * (width - 2.0 * margin)
+
+            scale = (width - 2.0 * margin) / span
+            rim_width = max(12.0, min(18.0 * scale, 40.0))
+            rim_height = min((plot_bottom - plot_top) * 0.84, 170.0)
+            hub_height = rim_height * 0.56
+
+            # Raios vistos no corte: mostram o ângulo de bracing e o dish.
+            for flange_x, color in (
+                (flange_left, QColor(55, 105, 220, 115)),
+                (flange_right, QColor(220, 65, 60, 115)),
+            ):
+                for rim_sign in (-1, 1):
+                    painter.setPen(
+                        QPen(
+                            color,
+                            1.6,
+                            Qt.PenStyle.SolidLine,
+                            Qt.PenCapStyle.RoundCap,
+                        )
+                    )
+                    painter.drawLine(
+                        QPointF(screen_x(flange_x), center_y + rim_sign * hub_height * 0.30),
+                        QPointF(screen_x(0.0), center_y + rim_sign * rim_height * 0.42),
+                    )
+
+            # Eixo e corpo do cubo.
+            axle_left = locknuts[0] if locknuts else flange_left
+            axle_right = locknuts[1] if locknuts else flange_right
+            painter.setPen(QPen(QColor(120, 120, 125), 1.2))
+            painter.drawLine(
+                QPointF(screen_x(axle_left), center_y),
+                QPointF(screen_x(axle_right), center_y),
+            )
+            painter.setPen(QPen(QColor(80, 80, 85), 1.2))
+            painter.setBrush(QColor(190, 190, 198))
+            painter.drawRoundedRect(
+                QRectF(
+                    screen_x(flange_left),
+                    center_y - 7.0,
+                    max(screen_x(flange_right) - screen_x(flange_left), 2.0),
+                    14.0,
+                ),
+                4.0,
+                4.0,
+            )
+
+            # Flanges.
+            painter.setPen(QPen(QColor(70, 70, 80), 3.0))
+            for flange_x in (flange_left, flange_right):
+                painter.drawLine(
+                    QPointF(screen_x(flange_x), center_y - hub_height / 2.0),
+                    QPointF(screen_x(flange_x), center_y + hub_height / 2.0),
+                )
+
+            # Locknuts.
+            if locknuts:
+                painter.setPen(QPen(QColor(45, 45, 50), 2.0))
+                for locknut_x in locknuts:
+                    painter.drawLine(
+                        QPointF(
+                            screen_x(locknut_x),
+                            center_y - hub_height * 0.42,
+                        ),
+                        QPointF(
+                            screen_x(locknut_x),
+                            center_y + hub_height * 0.42,
+                        ),
+                    )
+
+            # Aro em corte.
+            painter.setPen(QPen(QColor(80, 80, 90), 1.5))
+            painter.setBrush(QColor(225, 225, 232))
+            painter.drawRoundedRect(
+                QRectF(
+                    screen_x(0.0) - rim_width / 2.0,
+                    center_y - rim_height / 2.0,
+                    rim_width,
+                    rim_height,
+                ),
+                5.0,
+                5.0,
+            )
+
+            # Linhas de referência: plano do aro e centro do cubo.
+            if abs(hub_center) < 0.05:
+                painter.setPen(
+                    QPen(QColor(30, 140, 70), 1.4, Qt.PenStyle.DashLine)
+                )
+                painter.drawLine(
+                    QPointF(screen_x(0.0), plot_top - 4.0),
+                    QPointF(screen_x(0.0), plot_bottom + 2.0),
+                )
+            else:
+                painter.setPen(
+                    QPen(QColor(30, 120, 210), 1.4, Qt.PenStyle.DashLine)
+                )
+                painter.drawLine(
+                    QPointF(screen_x(0.0), plot_top - 4.0),
+                    QPointF(screen_x(0.0), plot_bottom + 2.0),
+                )
+                painter.setPen(
+                    QPen(QColor(205, 70, 60), 1.4, Qt.PenStyle.DashLine)
+                )
+                painter.drawLine(
+                    QPointF(screen_x(hub_center), plot_top - 4.0),
+                    QPointF(screen_x(hub_center), plot_bottom + 2.0),
+                )
+
+            self._draw_status(painter, spec)
+            self._draw_dimension(painter, spec, screen_x, width, height)
+            self._draw_labels(painter, spec, screen_x, plot_top, plot_bottom)
+        finally:
+            painter.end()
+
+    def _draw_message(self, painter: QPainter, message: str) -> None:
+        painter.setPen(QColor(120, 40, 40))
+        painter.setFont(QFont("Sans", 10))
+        painter.drawText(
+            self.rect(),
+            Qt.AlignmentFlag.AlignCenter | Qt.AlignmentFlag.TextWordWrap,
+            message,
+        )
+
+    def _draw_status(self, painter: QPainter, spec: WheelSpec) -> None:
+        offset = spec.rim_offset_mm
+        if spec.is_centered:
+            text = "Centralizada (dish ≈ 0)"
+            color = QColor(25, 120, 60)
+        else:
+            direction = "esquerda" if offset > 0 else "direita"
+            sign = "+" if offset > 0 else ""
+            text = (
+                f"Deslocada {sign}{_fmt(offset, 1)} mm — mover o aro "
+                f"{_fmt(abs(offset), 1)} mm para a {direction}"
+            )
+            color = QColor(175, 45, 40)
+        painter.setPen(color)
+        painter.setFont(QFont("Sans", 9, QFont.Weight.DemiBold))
+        painter.drawText(
+            QRectF(10, 8, self.width() - 20, 20),
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+            text,
+        )
+
+    def _draw_dimension(
+        self,
+        painter: QPainter,
+        spec: WheelSpec,
+        screen_x,
+        width: float,
+        height: float,
+    ) -> None:
+        y = height - 30.0
+        x_rim = screen_x(0.0)
+        x_hub = screen_x(spec.hub_center_mm)
+        painter.setPen(QPen(QColor(90, 90, 95), 1.0))
+        if abs(spec.hub_center_mm) >= 0.05:
+            painter.drawLine(QPointF(x_rim, y), QPointF(x_hub, y))
+            for x, direction in ((x_rim, -1.0), (x_hub, 1.0)):
+                painter.drawLine(
+                    QPointF(x, y), QPointF(x + direction * 5.0, y - 3.0)
+                )
+                painter.drawLine(
+                    QPointF(x, y), QPointF(x + direction * 5.0, y + 3.0)
+                )
+        sign = "+" if spec.rim_offset_mm > 0 else ""
+        text = f"dish {sign}{_fmt(spec.rim_offset_mm, 1)} mm"
+        painter.setFont(QFont("Sans", 8))
+        painter.setPen(QColor(70, 70, 75))
+        left = min(max((x_rim + x_hub) / 2.0 - 60.0, 2.0), width - 122.0)
+        painter.drawText(
+            QRectF(left, y - 18.0, 120.0, 14.0),
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
+
+    def _draw_labels(
+        self,
+        painter: QPainter,
+        spec: WheelSpec,
+        screen_x,
+        plot_top: float,
+        plot_bottom: float,
+    ) -> None:
+        self._label(
+            painter, screen_x(0.0), plot_top - 18.0, "aro", QColor(70, 70, 80)
+        )
+        self._label(
+            painter,
+            screen_x(spec.hub_center_mm),
+            plot_top + 18.0,
+            "centro do cubo",
+            QColor(25, 120, 60)
+            if spec.is_centered
+            else QColor(170, 60, 55),
+        )
+
+        flange_left = spec.hub_center_mm - spec.left_flange_offset_mm
+        flange_right = spec.hub_center_mm + spec.right_flange_offset_mm
+        self._label(
+            painter,
+            screen_x(flange_left),
+            plot_bottom + 2.0,
+            "flange E",
+            QColor(55, 105, 220),
+        )
+        self._label(
+            painter,
+            screen_x(flange_right),
+            plot_bottom + 2.0,
+            "flange D",
+            QColor(220, 65, 60),
+        )
+
+        locknuts = spec.locknut_positions_mm()
+        if locknuts:
+            self._label(
+                painter,
+                screen_x(locknuts[0]),
+                plot_top + 2.0,
+                "locknut E",
+                QColor(50, 50, 55),
+            )
+            self._label(
+                painter,
+                screen_x(locknuts[1]),
+                plot_top + 2.0,
+                "locknut D",
+                QColor(50, 50, 55),
+            )
+
+    def _label(
+        self,
+        painter: QPainter,
+        x: float,
+        y: float,
+        text: str,
+        color: QColor,
+    ) -> None:
+        painter.setPen(QPen(Qt.PenStyle.NoPen))
+        painter.setBrush(QColor(250, 250, 252, 225))
+        left = min(max(x - 50.0, 2.0), self.width() - 102.0)
+        painter.drawRect(QRectF(left, y, 100.0, 14.0))
+        painter.setPen(color)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.setFont(QFont("Sans", 7))
+        painter.drawText(
+            QRectF(left, y, 100.0, 14.0),
+            Qt.AlignmentFlag.AlignCenter,
+            text,
+        )
+
+
 class WheelCalculatorApp(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -275,6 +695,7 @@ class WheelCalculatorApp(QMainWindow):
 
         self.lat_offsets: list[float] = []
         self.rad_offsets: list[float] = []
+        self.last_sheet: BuildSheet | None = None
 
         self._build_ui()
         self.reset_sim()
@@ -292,20 +713,43 @@ class WheelCalculatorApp(QMainWindow):
         self.tabs = QTabWidget()
         self.init_calculator_tab()
         self.init_truing_sim_tab()
+        self.init_build_sheet_tab()
         splitter.addWidget(self.tabs)
 
         visualizer_group = QGroupBox("Visualizador de montagem e desvios")
         viz_layout = QVBoxLayout(visualizer_group)
 
+        display_row = QHBoxLayout()
+        self.show_left_cb = QCheckBox("Esquerda")
+        self.show_right_cb = QCheckBox("Direita")
+        self.show_leading_cb = QCheckBox("Leading")
+        self.show_trailing_cb = QCheckBox("Trailing")
+        for checkbox in (
+            self.show_left_cb,
+            self.show_right_cb,
+            self.show_leading_cb,
+            self.show_trailing_cb,
+        ):
+            checkbox.setChecked(True)
+            checkbox.toggled.connect(self._update_view_flags)
+            display_row.addWidget(checkbox)
+        display_row.addStretch()
+        viz_layout.addLayout(display_row)
+
         viz_splitter = QSplitter(Qt.Orientation.Vertical)
         self.visualizer = WheelVisualizer()
+        self.centering_view = CenteringView()
+        self.view_tabs = QTabWidget()
+        self.view_tabs.addTab(self.visualizer, "Vista superior")
+        self.view_tabs.addTab(self.centering_view, "Corte / dish")
+
         self.info_text = QTextEdit()
         self.info_text.setReadOnly(True)
         self.info_text.setMinimumHeight(170)
         self.info_text.setFont(
             QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
         )
-        viz_splitter.addWidget(self.visualizer)
+        viz_splitter.addWidget(self.view_tabs)
         viz_splitter.addWidget(self.info_text)
         viz_splitter.setStretchFactor(0, 3)
         viz_splitter.setStretchFactor(1, 2)
@@ -363,23 +807,37 @@ class WheelCalculatorApp(QMainWindow):
             "(centro a centro dos furos), não o diâmetro externo do flange."
         )
         self.flange_left_input.setToolTip(
-            "Distância do plano do aro ao flange esquerdo. Em uma roda "
-            "centralizada, equivale à distância do centro do cubo ao flange."
+            "Distância do centro do cubo ao flange esquerdo, medida no eixo. "
+            "O plano do aro é ajustado pelo dish."
         )
         self.flange_right_input.setToolTip(
-            "Distância do plano do aro ao flange direito. Em uma roda "
-            "centralizada, equivale à distância do centro do cubo ao flange."
+            "Distância do centro do cubo ao flange direito, medida no eixo. "
+            "O plano do aro é ajustado pelo dish."
         )
         self.hole_dia_input.setToolTip(
             "Diâmetro do furo do flange (comum 2,6 mm). O comprimento do "
             "raio é reduzido em metade desse valor."
         )
 
+        self.dish_input = QLineEdit("0.0")
+        self.dish_input.setToolTip(
+            "Deslocamento do plano do aro em relação ao centro do cubo, em mm. "
+            "Positivo = aro à direita. Use 0 para uma roda centralizada."
+        )
+        self.locknut_input = QLineEdit("130.0")
+        self.locknut_input.setToolTip(
+            "Distância entre as faces externas dos locknuts (OLD). Ex.: 130 mm "
+            "no traseiro e 100 mm no dianteiro. Usada no desenho de "
+            "centralização; pode ficar em branco."
+        )
+
         hub_form.addRow("PCD esquerdo (mm):", self.pcd_left_input)
         hub_form.addRow("PCD direito (mm):", self.pcd_right_input)
-        hub_form.addRow("Offset flange esq. (mm):", self.flange_left_input)
-        hub_form.addRow("Offset flange dir. (mm):", self.flange_right_input)
+        hub_form.addRow("Flange esq. ao centro (mm):", self.flange_left_input)
+        hub_form.addRow("Flange dir. ao centro (mm):", self.flange_right_input)
         hub_form.addRow("Diâmetro do furo (mm):", self.hole_dia_input)
+        hub_form.addRow("Dish / desloc. do aro (mm):", self.dish_input)
+        hub_form.addRow("Distância entre locknuts (mm):", self.locknut_input)
         layout.addWidget(hub_group)
 
         pattern_group = QGroupBox("Padrão e tensão")
@@ -430,7 +888,7 @@ class WheelCalculatorApp(QMainWindow):
         note = QLabel(
             "O livro manda arredondar o comprimento sempre para baixo: o raio "
             "estica sob tensão e o aro pode encolher. Os offsets são medidos do "
-            "plano do aro ao flange."
+            "centro do cubo ao flange; o dish desloca o plano do aro."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #555;")
@@ -465,6 +923,7 @@ class WheelCalculatorApp(QMainWindow):
         form.addRow("Índice do raio (0 a N-1):", self.sim_spoke_idx)
         form.addRow("Ajuste no niple:", self.sim_turn_val)
         layout.addLayout(form)
+        self.sim_spoke_idx.textChanged.connect(self._on_sim_index_changed)
 
         apply_btn = QPushButton("Aplicar ajuste")
         apply_btn.clicked.connect(self.apply_sim_adjustment)
@@ -479,9 +938,9 @@ class WheelCalculatorApp(QMainWindow):
         layout.addWidget(example_btn)
 
         note = QLabel(
-            "Fase 0: modelo didático. O ajuste de niple move o raio e os "
-            "vizinhos com um fator fixo; ainda não há equilíbrio elástico do "
-            "aro nem tensão. O solver físico entra na Fase 2."
+            "Modelo didático. O ajuste de niple move o raio e os vizinhos com "
+            "um fator fixo; ainda não há equilíbrio elástico do aro nem tensão. "
+            "O solver físico entra na Fase 2."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #555;")
@@ -489,6 +948,152 @@ class WheelCalculatorApp(QMainWindow):
         layout.addStretch()
 
         self.tabs.addTab(tab, "Simulador de alinhamento")
+
+    def init_build_sheet_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        self.sheet_preview = QTextEdit()
+        self.sheet_preview.setReadOnly(True)
+        self.sheet_preview.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.sheet_preview.setPlainText(
+            "Calcule os raios para gerar a ficha de montagem."
+        )
+        layout.addWidget(self.sheet_preview, 1)
+
+        buttons = QHBoxLayout()
+        json_btn = QPushButton("Salvar JSON...")
+        json_btn.clicked.connect(self.save_sheet_json)
+        md_btn = QPushButton("Salvar Markdown...")
+        md_btn.clicked.connect(self.save_sheet_markdown)
+        pdf_btn = QPushButton("Exportar PDF...")
+        pdf_btn.clicked.connect(self.export_sheet_pdf)
+        buttons.addWidget(json_btn)
+        buttons.addWidget(md_btn)
+        buttons.addWidget(pdf_btn)
+        layout.addLayout(buttons)
+
+        note = QLabel(
+            "A ficha reúne medidas, comprimentos, tensões, centralização e "
+            "avisos. JSON serve para reutilizar os dados; Markdown e PDF, para "
+            "levar para a bancada."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        self.tabs.addTab(tab, "Ficha de montagem")
+
+    def _selected_sim_index(self) -> int | None:
+        try:
+            index = int(self.sim_spoke_idx.text().strip())
+            spoke_count = int(self.spokes_count_combo.currentText())
+        except (ValueError, TypeError):
+            return None
+        return index if 0 <= index < spoke_count else None
+
+    def _on_sim_index_changed(self, *args) -> None:
+        if hasattr(self, "visualizer"):
+            self.visualizer.set_selected_index(self._selected_sim_index())
+
+    def _update_view_flags(self, *args) -> None:
+        if hasattr(self, "visualizer"):
+            self.visualizer.set_visibility(
+                self.show_left_cb.isChecked(),
+                self.show_right_cb.isChecked(),
+                self.show_leading_cb.isChecked(),
+                self.show_trailing_cb.isChecked(),
+            )
+
+    def _ensure_sheet(self) -> BuildSheet | None:
+        if self.last_sheet is None:
+            self.calculate_spokes()
+        return self.last_sheet
+
+    @staticmethod
+    def _with_suffix(path: str, suffix: str) -> str:
+        return path if path.lower().endswith(suffix) else path + suffix
+
+    def save_sheet_json(self) -> None:
+        sheet = self._ensure_sheet()
+        if sheet is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar ficha em JSON",
+            "ficha_roda.json",
+            "JSON (*.json)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".json")
+        try:
+            sheet.save_json(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Ficha de montagem", str(exc))
+            return
+        self.statusBar().showMessage(f"Ficha salva em {path}", 5000)
+
+    def save_sheet_markdown(self) -> None:
+        sheet = self._ensure_sheet()
+        if sheet is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Salvar ficha em Markdown",
+            "ficha_roda.md",
+            "Markdown (*.md)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".md")
+        try:
+            sheet.save_markdown(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Ficha de montagem", str(exc))
+            return
+        self.statusBar().showMessage(f"Ficha salva em {path}", 5000)
+
+    def export_sheet_pdf(self) -> None:
+        sheet = self._ensure_sheet()
+        if sheet is None:
+            return
+        if QPrinter is None:
+            QMessageBox.warning(
+                self,
+                "Exportar PDF",
+                "QtPrintSupport não está disponível nesta instalação.",
+            )
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Exportar ficha em PDF",
+            "ficha_roda.pdf",
+            "PDF (*.pdf)",
+        )
+        if not path:
+            return
+        path = self._with_suffix(path, ".pdf")
+        try:
+            self._write_pdf(sheet, path)
+        except Exception as exc:  # noqa: BLE001 - erro de impressão do Qt
+            QMessageBox.warning(self, "Exportar PDF", str(exc))
+            return
+        self.statusBar().showMessage(f"PDF gerado em {path}", 5000)
+
+    def _write_pdf(self, sheet: BuildSheet, path: str) -> None:
+        if QPrinter is None:
+            raise RuntimeError("QtPrintSupport não está disponível.")
+        printer = QPrinter(QPrinter.PrinterMode.HighResolution)
+        printer.setOutputFormat(QPrinter.OutputFormat.PdfFormat)
+        printer.setOutputFileName(path)
+        printer.setDocName("Ficha de montagem — Wheel Lab")
+        printer.setCreator("Wheel Lab")
+        document = QTextDocument()
+        document.setHtml(sheet.to_html())
+        document.print_(printer)
 
     def calculate_erd_dialog(self) -> None:
         outer, ok = QInputDialog.getDouble(
@@ -548,6 +1153,14 @@ class WheelCalculatorApp(QMainWindow):
         crossings = self.cross_combo.currentData()
         if crossings is None:
             raise ValueError("Selecione o número de cruzamentos.")
+
+        locknut_text = self.locknut_input.text().strip().replace(",", ".")
+        locknut_spacing = (
+            self._parse_float(self.locknut_input, "Distância entre locknuts")
+            if locknut_text
+            else None
+        )
+
         spec = WheelSpec(
             erd_mm=self._parse_float(self.erd_input, "ERD"),
             left_flange_diameter_mm=self._parse_float(
@@ -557,16 +1170,20 @@ class WheelCalculatorApp(QMainWindow):
                 self.pcd_right_input, "PCD direito"
             ),
             left_flange_offset_mm=self._parse_float(
-                self.flange_left_input, "Offset esquerdo"
+                self.flange_left_input, "Flange esquerdo"
             ),
             right_flange_offset_mm=self._parse_float(
-                self.flange_right_input, "Offset direito"
+                self.flange_right_input, "Flange direito"
             ),
             hole_diameter_mm=self._parse_float(
                 self.hole_dia_input, "Diâmetro do furo"
             ),
             spoke_count=int(self.spokes_count_combo.currentText()),
             crossings=int(crossings),
+            rim_offset_mm=self._parse_float(
+                self.dish_input, "Dish / deslocamento do aro"
+            ),
+            locknut_spacing_mm=locknut_spacing,
         )
         spec.validate()
         return spec
@@ -574,95 +1191,14 @@ class WheelCalculatorApp(QMainWindow):
     def calculate_spokes(self) -> None:
         try:
             spec = self._read_spec()
-            result = calculate_spoke_lengths(spec)
-
             target = self._parse_float(
                 self.target_tension_input, "Tensão alvo"
             )
             diameter = self._parse_float(
                 self.spoke_diameter_input, "Diâmetro do raio"
             )
-            if target <= 0:
-                raise ValueError("A tensão alvo deve ser positiva.")
-            if diameter <= 0:
-                raise ValueError("O diâmetro do raio deve ser positivo.")
+            sheet = create_build_sheet(spec, target, diameter)
 
-            ratio = lateral_tension_ratio(
-                spec.left_flange_offset_mm,
-                spec.right_flange_offset_mm,
-                result.left_mm,
-                result.right_mm,
-            )
-            if ratio < 1.0:
-                tighter = Side.RIGHT
-            elif ratio > 1.0:
-                tighter = Side.LEFT
-            else:
-                tighter = Side.RIGHT
-
-            tensions = target_tensions(target, ratio, tighter)
-            compression = rim_compression_from_sides(
-                tensions[Side.LEFT],
-                tensions[Side.RIGHT],
-                spec.spoke_count,
-            )
-            mu = linear_density_kg_per_m(diameter)
-            elongation_left = spoke_elongation_mm(
-                tensions[Side.LEFT], result.left_mm, diameter
-            )
-            elongation_right = spoke_elongation_mm(
-                tensions[Side.RIGHT], result.right_mm, diameter
-            )
-            tone_left = tone_frequency_hz(
-                tensions[Side.LEFT], result.left_mm, mu
-            )
-            tone_right = tone_frequency_hz(
-                tensions[Side.RIGHT], result.right_mm, mu
-            )
-
-            tighter_label = "direito" if tighter is Side.RIGHT else "esquerdo"
-            lines = [
-                "=== COMPRIMENTO DOS RAIOS ===",
-                f"Ângulo de cruzamento (T): {_fmt(result.angle_deg, 1)}°",
-                (
-                    f"Esquerdo: {_fmt(result.left_mm, 2)} mm "
-                    f"→ comprar {result.left_purchase_mm} mm"
-                ),
-                (
-                    f"Direito:  {_fmt(result.right_mm, 2)} mm "
-                    f"→ comprar {result.right_purchase_mm} mm"
-                ),
-                (
-                    "Diferença L-R: "
-                    f"{_fmt(abs(result.left_mm - result.right_mm), 2)} mm"
-                ),
-                "",
-                "=== TENSÃO (estimativa) ===",
-                (
-                    f"Razão T_esq / T_dir: {_fmt(ratio, 3)} "
-                    f"(lado {tighter_label} mais tenso)"
-                ),
-                (
-                    f"Alvo esquerdo: {_fmt(tensions[Side.LEFT], 0)} N | "
-                    f"direito: {_fmt(tensions[Side.RIGHT], 0)} N "
-                    f"(lado mais tenso: {tighter_label})"
-                ),
-                f"Compressão no aro: {_fmt(compression, 0)} N",
-                (
-                    f"Alongamento a essa tensão: esq. "
-                    f"{_fmt(elongation_left, 2)} mm | dir. "
-                    f"{_fmt(elongation_right, 2)} mm"
-                ),
-                (
-                    f"Tom aproximado: esq. {_fmt(tone_left, 0)} Hz | "
-                    f"dir. {_fmt(tone_right, 0)} Hz"
-                ),
-                "",
-                "Notas:",
-                "• Comprimento arredondado para baixo (raio estica, aro encolhe).",
-                "• Tom é aproximado; use tensiômetro para tensão absoluta.",
-                "• Offsets medidos do plano do aro ao flange.",
-            ]
             if len(self.lat_offsets) != spec.spoke_count:
                 self.lat_offsets = [0.0] * spec.spoke_count
                 self.rad_offsets = [0.0] * spec.spoke_count
@@ -673,10 +1209,18 @@ class WheelCalculatorApp(QMainWindow):
                 self.lat_offsets,
                 self.rad_offsets,
             )
-            self.info_text.setPlainText("\n".join(lines))
+            self.visualizer.set_selected_index(self._selected_sim_index())
+            self.centering_view.set_spec(spec)
+            self.last_sheet = sheet
+            self.info_text.setPlainText(sheet.to_summary_text())
+            self.sheet_preview.setMarkdown(sheet.to_markdown())
             self.statusBar().showMessage("Cálculo concluído.", 5000)
         except ValueError as exc:
+            self.last_sheet = None
             self.info_text.setPlainText(f"Erro: {exc}")
+            self.sheet_preview.setPlainText(
+                "Corrija os dados e calcule os raios para gerar a ficha."
+            )
             self.statusBar().showMessage(
                 "Corrija os dados e tente novamente.", 5000
             )
@@ -697,6 +1241,7 @@ class WheelCalculatorApp(QMainWindow):
                 self.lat_offsets,
                 self.rad_offsets,
             )
+            self._on_sim_index_changed()
             self.info_text.setPlainText(
                 f"Simulador resetado: {spoke_count} raios, {crossings}x, "
                 "sem desvios.\n"
@@ -728,6 +1273,7 @@ class WheelCalculatorApp(QMainWindow):
                 self.lat_offsets,
                 self.rad_offsets,
             )
+            self._on_sim_index_changed()
             self.info_text.setPlainText(
                 "Exemplo didático carregado:\n"
                 "• Desvio lateral de ±1,5 mm (seno de uma volta).\n"
@@ -779,6 +1325,7 @@ class WheelCalculatorApp(QMainWindow):
                 self.lat_offsets,
                 self.rad_offsets,
             )
+            self._on_sim_index_changed()
 
             lateral_max = max(abs(value) for value in self.lat_offsets)
             radial_range = max(self.rad_offsets) - min(self.rad_offsets)
@@ -788,8 +1335,8 @@ class WheelCalculatorApp(QMainWindow):
                 f"• {float(turns):+.2f} volta(s) = {delta_mm:+.3f} mm\n"
                 f"• Desvio lateral máximo: {_fmt(lateral_max, 2)} mm\n"
                 f"• Faixa radial (máx - mín): {_fmt(radial_range, 2)} mm\n\n"
-                "Modelo didático da Fase 0: o aro ainda não é resolvido por "
-                "equilíbrio elástico e a tensão não é calculada."
+                "Modelo didático: o aro ainda não é resolvido por equilíbrio "
+                "elástico e a tensão não é calculada."
             )
         except (ValueError, IndexError, TypeError) as exc:
             self.info_text.setPlainText(f"Erro: {exc}")

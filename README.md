@@ -5,9 +5,10 @@ em *The Bicycle Wheel* (Jobst Brandt, 3ª ed.).
 
 O projeto começou como um protótipo de calculadora em PySide6. A Fase 0 separa
 a engenharia da interface, corrige os crashes do protótipo e cria uma base
-testável para o simulador físico de truing.
+testável. A Fase 1 completa a calculadora, adiciona dish/centralização e gera
+uma ficha de montagem.
 
-## Estado atual (Fase 0)
+## Estado atual (Fase 1)
 
 - **Núcleo de cálculo puro em Python** (`wheel_lab/core/`), sem Qt e sem NumPy.
 - **Comprimento de raio** pela equação 1 de Brandt, por lado, com arredondamento
@@ -18,8 +19,11 @@ testável para o simulador físico de truing.
   compressão do aro, alongamento do raio e tom aproximado.
 - **Constantes de montagem**: passo de rosca de 56 TPI (≈ 0,4536 mm/volta;
   1/4 de volta ≈ 0,1134 mm).
-- **Visualizador** esquemático com lados, leading/trailing, válvula, perfil
-  deformado e cores para desvio lateral.
+- **Dish/centralização**: offsets medidos do centro do cubo, deslocamento do
+  plano do aro, distância entre locknuts e correção sugerida.
+- **Visualizador** com vista superior, corte axial, filtros por lado/sentido e
+  destaque do raio selecionado.
+- **Ficha de montagem** com resumo, JSON, Markdown e PDF.
 - **Simulador didático** de ajuste de niple, sem crashes ao trocar 32 → 36
   raios. O solver físico do aro entra na Fase 2.
 - **Testes** de engenharia e smoke tests da UI em modo offscreen.
@@ -30,27 +34,28 @@ visual até a Fase 2.
 
 ## Instalação
 
-Requisitos: Python 3.10+ e Linux/Windows/macOS com Qt.
+Requisitos: Python 3.10+ e Linux/Windows/macOS com Qt. O projeto usa
+[uv](https://docs.astral.sh/uv/) para criar o ambiente e travar as versões
+(`uv.lock`); não é preciso criar `.venv` nem usar `pip` manualmente.
 
 ```bash
-./install.sh
-./run.sh
+./install.sh   # uv sync
+./run.sh       # uv run wheel_builder_qt.py
 ```
 
 Ou manualmente:
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements.txt
-.venv/bin/python wheel_builder_qt.py
+uv sync
+uv run wheel_builder_qt.py
 ```
 
 Em NixOS, o wheel do PySide6 não traz `libGL`, `libxkbcommon` e outras
-bibliotecas do sistema. O `run.sh` detecta o Nix e usa o `shell.nix`, que
-aponta o `LD_LIBRARY_PATH` para elas. Se preferir rodar direto:
+bibliotecas do sistema. O `shell.nix` fornece essas bibliotecas **e o próprio
+uv**; o `run.sh` detecta o Nix automaticamente. Se preferir rodar direto:
 
 ```bash
-nix-shell --run ".venv/bin/python wheel_builder_qt.py"
+nix-shell --run "uv run wheel_builder_qt.py"
 ```
 
 O script antigo `install_numpy.sh` foi mantido como atalho para `install.sh`.
@@ -58,8 +63,13 @@ O script antigo `install_numpy.sh` foi mantido como atalho para `install.sh`.
 ## Testes
 
 ```bash
-.venv/bin/pip install -r requirements-dev.txt
-.venv/bin/python -m pytest
+uv run pytest
+```
+
+Em NixOS:
+
+```bash
+nix-shell --run "uv run pytest"
 ```
 
 Os testes da UI usam `QT_QPA_PLATFORM=offscreen` (definido em
@@ -69,8 +79,10 @@ Os testes da UI usam `QT_QPA_PLATFORM=offscreen` (definido em
 
 ```text
 wheel_builder_qt.py       # janela PySide6 (entry point)
+pyproject.toml            # dependências e configuração do projeto
+uv.lock                   # versões travadas pelo uv
 run.sh                    # executa a UI (com Nix quando disponível)
-shell.nix                 # bibliotecas gráficas para NixOS
+shell.nix                 # uv + bibliotecas gráficas para NixOS
 wheel_lab/
   __init__.py
   core/
@@ -79,9 +91,12 @@ wheel_lab/
     spoke_length.py       # equação 1 e arredondamento
     lacing.py             # tabela de raios para desenho
     tension.py            # razão L/R, alvo, alongamento, tom, pneu
+    build_sheet.py        # ficha, JSON, Markdown e HTML/PDF
     units.py              # TPI, voltas ↔ mm
 tests/
   test_spoke_length.py
+  test_centering.py
+  test_build_sheet.py
   test_geometry.py
   test_tension.py
   test_lacing.py
@@ -97,12 +112,15 @@ Comprimento de raio (Brandt, eq. 1):
 L = sqrt(A² + B² + C²) - S/2
 A = (d/2)·sin(T)
 B = D/2 - (d/2)·cos(T)
-C = offset do flange ao plano do aro
+C_esq = offset_esq + dish
+C_dir = offset_dir - dish
 T = 360·X/(N/2)
 ```
 
 - `D` = ERD, `d` = diâmetro da circunferência dos furos do flange,
   `S` = diâmetro do furo do flange, `X` = cruzamentos, `N` = total de raios.
+- `dish` positivo desloca o plano do aro para a direita do centro do cubo;
+  a correção de centralização é `-dish`.
 - O livro manda arredondar **para baixo**: o raio estica ~1 mm e o aro pode
   encolher ~2 mm sob tensão.
 
@@ -117,13 +135,13 @@ do pneu (eq. 8) estão em `wheel_lab/core/tension.py`.
 
 ## Roadmap
 
-- **Fase 0 (atual)**: núcleo, validação, testes, correções de UI.
-- **Fase 1**: calculadora completa, visualizador de montagem, dish/centralização
-  e build sheet.
+- **Fase 0 (concluída)**: núcleo, validação, testes, correções de UI.
+- **Fase 1 (atual)**: calculadora completa, visualizador de montagem,
+  dish/centralização e build sheet em JSON/Markdown/PDF.
 - **Fase 2**: solver físico de truing (aro como viga/anel + raios como molas
   só-tração), tensão, runout e sugestões de ajuste.
 - **Fase 3**: assistente dos 4 conjuntos de montagem, biblioteca de componentes
-  e exportação em PDF.
+  e integração com o build sheet.
 - **Fase 4**: rigidez/FEM, leitura de tom por microfone e diagnóstico avançado.
 
 ## Referência e direitos autorais

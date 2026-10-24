@@ -42,9 +42,17 @@ class SpokeDirection(str, Enum):
 class WheelSpec:
     """Medidas necessárias para calcular os comprimentos dos raios.
 
-    Os offsets são as distâncias **do plano do aro ao flange** (o ``C`` da
-    equação 1 de Brandt). Em uma roda centralizada, isso equivale à distância
-    do centro do cubo ao flange.
+    ``left_flange_offset_mm`` e ``right_flange_offset_mm`` são as distâncias
+    **do centro do cubo aos flanges**. O plano do aro pode estar deslocado
+    desse centro; ``rim_offset_mm`` é esse deslocamento (positivo = aro à
+    direita do centro do cubo). Os offsets efetivos usados na equação 1 são::
+
+        C_esquerdo = offset_esquerdo + rim_offset
+        C_direito  = offset_direito  - rim_offset
+
+    Com ``rim_offset_mm = 0`` a roda está centralizada entre os locknuts.
+    ``locknut_spacing_mm`` é a distância entre as faces externas dos locknuts
+    (OLD); é opcional, mas necessária para desenhar a centralização.
 
     ``erd_mm`` é o *effective rim diameter*: o diâmetro em que as pontas dos
     raios ficam flush com a extremidade do niple.
@@ -58,6 +66,62 @@ class WheelSpec:
     hole_diameter_mm: float = 2.6
     spoke_count: int = 32
     crossings: int = 3
+    rim_offset_mm: float = 0.0
+    locknut_spacing_mm: float | None = None
+
+    @property
+    def effective_left_offset_mm(self) -> float:
+        """Distância do plano do aro ao flange esquerdo (C da eq. 1)."""
+
+        return self.left_flange_offset_mm + self.rim_offset_mm
+
+    @property
+    def effective_right_offset_mm(self) -> float:
+        """Distância do plano do aro ao flange direito (C da eq. 1)."""
+
+        return self.right_flange_offset_mm - self.rim_offset_mm
+
+    @property
+    def flange_spacing_mm(self) -> float:
+        """Distância entre os flanges (centro a centro)."""
+
+        return self.left_flange_offset_mm + self.right_flange_offset_mm
+
+    @property
+    def hub_center_mm(self) -> float:
+        """Posição do centro do cubo em relação ao plano do aro (+ direita)."""
+
+        return -self.rim_offset_mm
+
+    @property
+    def centering_correction_mm(self) -> float:
+        """Deslocamento a aplicar ao aro para centralizar (+ direita)."""
+
+        return -self.rim_offset_mm
+
+    @property
+    def is_centered(self) -> bool:
+        """True se o desvio está dentro de 0,5 mm."""
+
+        return abs(self.rim_offset_mm) <= 0.5
+
+    def flange_positions_mm(self) -> tuple[float, float]:
+        """Posições axiais dos flanges em relação ao plano do aro."""
+
+        center = self.hub_center_mm
+        return (
+            center - self.left_flange_offset_mm,
+            center + self.right_flange_offset_mm,
+        )
+
+    def locknut_positions_mm(self) -> tuple[float, float] | None:
+        """Posições axiais dos locknuts em relação ao plano do aro."""
+
+        if self.locknut_spacing_mm is None:
+            return None
+        center = self.hub_center_mm
+        half = self.locknut_spacing_mm / 2.0
+        return (center - half, center + half)
 
     def validate(self) -> None:
         """Valida as medidas e o padrão de cruzamentos.
@@ -71,6 +135,26 @@ class WheelSpec:
         _require_positive("Offset do flange esquerdo", self.left_flange_offset_mm)
         _require_positive("Offset do flange direito", self.right_flange_offset_mm)
         _require_positive("Diâmetro do furo do flange", self.hole_diameter_mm)
+
+        if not math.isfinite(self.rim_offset_mm):
+            raise ValueError("O deslocamento do aro (dish) deve ser finito.")
+        if self.effective_left_offset_mm <= 0:
+            raise ValueError(
+                "O dish desloca o aro além do flange esquerdo; reduza o offset."
+            )
+        if self.effective_right_offset_mm <= 0:
+            raise ValueError(
+                "O dish desloca o aro além do flange direito; reduza o offset."
+            )
+
+        if self.locknut_spacing_mm is not None:
+            if (
+                not math.isfinite(self.locknut_spacing_mm)
+                or self.locknut_spacing_mm <= 0
+            ):
+                raise ValueError(
+                    "A distância entre locknuts deve ser um número positivo."
+                )
 
         if self.left_flange_diameter_mm >= self.erd_mm:
             raise ValueError("O diâmetro do flange esquerdo deve ser menor que o ERD.")

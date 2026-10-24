@@ -2,7 +2,7 @@
 
 let
   # Bibliotecas de sistema que o wheel do PySide6 espera encontrar.
-  # O Python e o PySide6 continuam vindo do .venv (pip).
+  # O Python, o PySide6 e o pytest vêm do ambiente do uv (uv.lock).
   libs = with pkgs; [
     libxkbcommon
     fontconfig
@@ -23,7 +23,7 @@ let
   ];
 in
 pkgs.mkShell {
-  packages = libs;
+  packages = libs ++ [ pkgs.uv ];
 
   shellHook = ''
     export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath libs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"

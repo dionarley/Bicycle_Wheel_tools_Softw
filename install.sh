@@ -1,21 +1,25 @@
 #!/usr/bin/env bash
-# Instala o ambiente do Wheel Lab em .venv e as dependências.
+# Cria/atualiza o ambiente gerenciado pelo uv e instala as dependências.
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+if command -v uv >/dev/null 2>&1; then
+  uv sync
+elif command -v nix-shell >/dev/null 2>&1 && [ -f shell.nix ]; then
+  nix-shell --run "uv sync"
+else
+  echo "uv não encontrado." >&2
+  echo "Instale com: curl -LsSf https://astral.sh/uv/install.sh | sh" >&2
+  exit 1
+fi
 
 echo
 echo "Pronto. Rode a interface com:"
 echo "  ./run.sh"
 echo
-echo "Em sistemas com as bibliotecas gráficas no caminho padrão, também vale:"
-echo "  .venv/bin/python wheel_builder_qt.py"
+echo "Ou diretamente:"
+echo "  uv run wheel_builder_qt.py"
 echo
 echo "Para rodar os testes:"
-echo "  .venv/bin/pip install -r requirements-dev.txt"
-echo "  .venv/bin/python -m pytest"
+echo "  uv run pytest"
