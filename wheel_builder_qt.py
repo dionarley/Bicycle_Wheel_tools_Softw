@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
+    QListWidget,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -48,7 +49,9 @@ except ImportError:  # pragma: no cover - depende da instalação do PySide6
     QPrinter = None  # type: ignore[assignment]
 
 from wheel_lab.core import (
+    AssemblyPlan,
     BuildSheet,
+    ComponentSet,
     Side,
     SpokeDirection,
     TruingState,
@@ -56,6 +59,7 @@ from wheel_lab.core import (
     WheelSpec,
     build_spoke_table,
     create_build_sheet,
+    default_component_library,
     erd_from_outer_diameter,
     is_valid_cross_pattern,
     max_crossings,
@@ -90,6 +94,7 @@ class WheelVisualizer(QWidget):
         self.show_leading = True
         self.show_trailing = True
         self.selected_index: int | None = None
+        self.highlighted_indices: set[int] = set()
         self.setMinimumSize(360, 360)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
@@ -123,6 +128,11 @@ class WheelVisualizer(QWidget):
 
         if self.selected_index is not None and self.selected_index >= len(self.spokes):
             self.selected_index = None
+        self.highlighted_indices = {
+            index
+            for index in self.highlighted_indices
+            if 0 <= index < len(self.spokes)
+        }
         self.update()
 
     def set_visibility(
@@ -149,6 +159,23 @@ class WheelVisualizer(QWidget):
             except (TypeError, ValueError):
                 value = -1
             self.selected_index = value if 0 <= value < len(self.spokes) else None
+        self.update()
+
+    def set_highlighted_indices(self, indices) -> None:
+        """Destaca um conjunto de raios (usado pelo assistente de montagem)."""
+
+        if indices is None:
+            self.highlighted_indices = set()
+        else:
+            values = set()
+            for index in indices:
+                try:
+                    value = int(index)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= value < len(self.spokes):
+                    values.add(value)
+            self.highlighted_indices = values
         self.update()
 
     def _spoke_visible(self, spoke) -> bool:
@@ -227,14 +254,35 @@ class WheelVisualizer(QWidget):
                     rim_points[(index + 1) % self.spoke_count],
                 )
 
-            # Raios. O selecionado é desenhado por último, para ficar no topo.
+            # Raios. O conjunto em destaque vem por cima dos demais; o raio
+            # selecionado é desenhado por último, para ficar no topo.
             hub_radius = base_radius * 0.18
             selected = self.selected_index
+            highlighted = self.highlighted_indices
             for index, spoke in enumerate(self.spokes):
-                if not self._spoke_visible(spoke) or index == selected:
+                if (
+                    not self._spoke_visible(spoke)
+                    or index == selected
+                    or index in highlighted
+                ):
                     continue
                 self._draw_spoke(
                     painter, index, spoke, rim_points, center, hub_radius
+                )
+            for index in sorted(highlighted):
+                if index == selected or not 0 <= index < len(self.spokes):
+                    continue
+                spoke = self.spokes[index]
+                if not self._spoke_visible(spoke):
+                    continue
+                self._draw_spoke(
+                    painter,
+                    index,
+                    spoke,
+                    rim_points,
+                    center,
+                    hub_radius,
+                    highlighted=True,
                 )
             if (
                 selected is not None
@@ -301,6 +349,7 @@ class WheelVisualizer(QWidget):
         center: QPointF,
         hub_radius: float,
         selected: bool = False,
+        highlighted: bool = False,
     ) -> None:
         hub_angle = math.radians(spoke.hub_angle_deg)
         hub_point = QPointF(
@@ -308,6 +357,17 @@ class WheelVisualizer(QWidget):
             center.y() + hub_radius * math.sin(hub_angle),
         )
         rim_point = rim_points[index]
+
+        if highlighted and not selected:
+            painter.setPen(
+                QPen(
+                    QColor(0, 180, 190, 150),
+                    7.5,
+                    Qt.PenStyle.SolidLine,
+                    Qt.PenCapStyle.RoundCap,
+                )
+            )
+            painter.drawLine(hub_point, rim_point)
 
         if selected:
             painter.setPen(
@@ -328,6 +388,8 @@ class WheelVisualizer(QWidget):
         if spoke.direction is SpokeDirection.TRAILING:
             color = color.darker(130)
         width = 2.2 if spoke.is_leading else 1.3
+        if highlighted and not selected:
+            width += 0.6
         if selected:
             color = QColor(255, 215, 45)
             width = 3.0
@@ -340,6 +402,11 @@ class WheelVisualizer(QWidget):
             )
         )
         painter.drawLine(hub_point, rim_point)
+
+        if highlighted and not selected:
+            painter.setBrush(QColor(0, 190, 200))
+            painter.setPen(QPen(QColor(30, 30, 30), 1.0))
+            painter.drawEllipse(rim_point, 3.5, 3.5)
 
         if selected:
             painter.setBrush(QColor(255, 215, 45))
@@ -358,13 +425,14 @@ class WheelVisualizer(QWidget):
             f"Raios: azul = esquerda, vermelho = direita\n"
             "Claro = leading, escuro = trailing\n"
             "Amarelo = raio selecionado\n"
+            "Ciano = conjunto em destaque\n"
             "Aro: azul = desvio p/ esquerda, vermelho = p/ direita\n"
             f"Deslocamentos exagerados {EXAGGERATION:.0f}×"
         )
         painter.setPen(QColor(70, 70, 70))
         painter.setFont(QFont("Sans", 8))
         painter.drawText(
-            QRectF(8, self.height() - 94, self.width() - 16, 86),
+            QRectF(8, self.height() - 108, self.width() - 16, 100),
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             legend,
         )
@@ -701,6 +769,13 @@ class WheelCalculatorApp(QMainWindow):
         self.truing_state: TruingState | None = None
         self.last_suggestion: TruingSuggestion | None = None
 
+        self.component_library = default_component_library()
+        self.current_components: ComponentSet | None = None
+        self.assembly_plan: AssemblyPlan | None = None
+        self.assembly_completed: set[int] = set()
+        self._updating_assembly_list = False
+        self._updating_component_combos = False
+
         self._build_ui()
         self.reset_sim()
         self.statusBar().showMessage(
@@ -717,6 +792,7 @@ class WheelCalculatorApp(QMainWindow):
         self.tabs = QTabWidget()
         self.init_calculator_tab()
         self.init_truing_sim_tab()
+        self.init_assembly_tab()
         self.init_build_sheet_tab()
         splitter.addWidget(self.tabs)
 
@@ -969,6 +1045,101 @@ class WheelCalculatorApp(QMainWindow):
 
         self.tabs.addTab(tab, "Simulador de alinhamento")
 
+    def init_assembly_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        components_group = QGroupBox("Biblioteca de componentes")
+        components_form = QFormLayout(components_group)
+
+        self.component_rim_combo = QComboBox()
+        self.component_hub_combo = QComboBox()
+        self.component_spoke_combo = QComboBox()
+        self.component_nipple_combo = QComboBox()
+        for rim in self.component_library.rims:
+            self.component_rim_combo.addItem(rim.name)
+        for hub in self.component_library.hubs:
+            self.component_hub_combo.addItem(hub.name)
+        for spoke in self.component_library.spokes:
+            self.component_spoke_combo.addItem(spoke.name)
+        for nipple in self.component_library.nipples:
+            self.component_nipple_combo.addItem(nipple.name)
+
+        components_form.addRow("Aro:", self.component_rim_combo)
+        components_form.addRow("Cubo:", self.component_hub_combo)
+        components_form.addRow("Raio:", self.component_spoke_combo)
+        components_form.addRow("Niple:", self.component_nipple_combo)
+
+        self.component_summary = QLabel()
+        self.component_summary.setWordWrap(True)
+        self.component_summary.setStyleSheet("color: #555;")
+        components_form.addRow(self.component_summary)
+
+        apply_components_btn = QPushButton("Aplicar componentes ao cálculo")
+        apply_components_btn.clicked.connect(self.apply_components)
+        components_form.addRow(apply_components_btn)
+        layout.addWidget(components_group)
+
+        assembly_group = QGroupBox("Assistente dos 4 conjuntos")
+        assembly_layout = QVBoxLayout(assembly_group)
+
+        self.assembly_progress = QLabel("Calcule os raios para gerar o plano.")
+        self.assembly_progress.setWordWrap(True)
+        assembly_layout.addWidget(self.assembly_progress)
+
+        self.assembly_group_list = QListWidget()
+        self.assembly_group_list.setMaximumHeight(115)
+        self.assembly_group_list.currentRowChanged.connect(
+            self._show_assembly_group
+        )
+        assembly_layout.addWidget(self.assembly_group_list)
+
+        self.assembly_text = QTextEdit()
+        self.assembly_text.setReadOnly(True)
+        self.assembly_text.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.assembly_text.setPlainText(
+            "O plano aparecerá aqui depois do cálculo."
+        )
+        assembly_layout.addWidget(self.assembly_text, 1)
+
+        buttons = QHBoxLayout()
+        generate_btn = QPushButton("Gerar plano")
+        generate_btn.clicked.connect(self.generate_assembly_plan)
+        complete_btn = QPushButton("Marcar conjunto concluído")
+        complete_btn.clicked.connect(self.complete_assembly_group)
+        clear_btn = QPushButton("Limpar progresso")
+        clear_btn.clicked.connect(self.clear_assembly_progress)
+        buttons.addWidget(generate_btn)
+        buttons.addWidget(complete_btn)
+        buttons.addWidget(clear_btn)
+        assembly_layout.addLayout(buttons)
+        layout.addWidget(assembly_group, 1)
+
+        note = QLabel(
+            "O assistente divide os raios em esquerda/direita e "
+            "leading/trailing, mostra os furos do aro e do flange e destaca "
+            "o conjunto atual no visualizador. A numeração é relativa: "
+            "comece no primeiro furo de raio ao lado da válvula."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        self.tabs.addTab(tab, "Assistente de montagem")
+
+        for combo in (
+            self.component_rim_combo,
+            self.component_hub_combo,
+            self.component_spoke_combo,
+            self.component_nipple_combo,
+        ):
+            combo.currentTextChanged.connect(
+                self._on_component_selection_changed
+            )
+        self._update_component_summary()
+
     def init_build_sheet_tab(self) -> None:
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -1005,6 +1176,335 @@ class WheelCalculatorApp(QMainWindow):
         layout.addWidget(note)
 
         self.tabs.addTab(tab, "Ficha de montagem")
+
+    def _component_set_from_ui(self) -> ComponentSet:
+        rim = self.component_library.find_rim(
+            self.component_rim_combo.currentText()
+        )
+        hub = self.component_library.find_hub(
+            self.component_hub_combo.currentText()
+        )
+        spoke = self.component_library.find_spoke(
+            self.component_spoke_combo.currentText()
+        )
+        nipple = self.component_library.find_nipple(
+            self.component_nipple_combo.currentText()
+        )
+        return ComponentSet(rim=rim, hub=hub, spoke=spoke, nipple=nipple)
+
+    def _sync_component_spoke_counts(self) -> None:
+        try:
+            rim = self.component_library.find_rim(
+                self.component_rim_combo.currentText()
+            )
+            hub = self.component_library.find_hub(
+                self.component_hub_combo.currentText()
+            )
+        except ValueError:
+            return
+        if rim.spoke_count == hub.spoke_count:
+            return
+
+        self._updating_component_combos = True
+        try:
+            if self.sender() is self.component_rim_combo:
+                match = next(
+                    (
+                        candidate
+                        for candidate in self.component_library.hubs
+                        if candidate.spoke_count == rim.spoke_count
+                    ),
+                    None,
+                )
+                if match is not None:
+                    self.component_hub_combo.setCurrentText(match.name)
+            else:
+                match = next(
+                    (
+                        candidate
+                        for candidate in self.component_library.rims
+                        if candidate.spoke_count == hub.spoke_count
+                    ),
+                    None,
+                )
+                if match is not None:
+                    self.component_rim_combo.setCurrentText(match.name)
+        finally:
+            self._updating_component_combos = False
+
+    def _on_component_selection_changed(self, *args) -> None:
+        if self._updating_component_combos:
+            return
+        self._sync_component_spoke_counts()
+        self.current_components = None
+        self._update_component_summary()
+
+    def _update_component_summary(self, applied: bool = False) -> None:
+        try:
+            components = self._component_set_from_ui()
+            components.validate()
+        except ValueError as exc:
+            self.component_summary.setText(
+                f"Componentes incompatíveis: {exc}"
+            )
+            return
+        lines = components.summary_lines()
+        lines.append("")
+        if applied:
+            lines.append("Componentes aplicados ao cálculo.")
+        else:
+            lines.append(
+                "Seleção ainda não aplicada; use 'Aplicar componentes ao "
+                "cálculo'."
+            )
+        self.component_summary.setText("\n".join(lines))
+
+    def apply_components(self) -> None:
+        try:
+            components = self._component_set_from_ui()
+            components.validate()
+            crossings = self.cross_combo.currentData()
+            if crossings is None:
+                raise ValueError("Selecione o número de cruzamentos.")
+
+            dish_text = self.dish_input.text().strip().replace(",", ".")
+            if dish_text:
+                try:
+                    dish = float(dish_text)
+                except ValueError as exc:
+                    raise ValueError(
+                        "Dish / deslocamento do aro: informe um número válido."
+                    ) from exc
+                if not math.isfinite(dish):
+                    raise ValueError(
+                        "Dish / deslocamento do aro: informe um número finito."
+                    )
+            else:
+                dish = 0.0
+
+            components.to_spec(
+                crossings=int(crossings),
+                rim_offset_mm=dish,
+            )
+
+            self.erd_input.setText(f"{components.rim.erd_mm:.1f}")
+            self.pcd_left_input.setText(
+                f"{components.hub.left_flange_diameter_mm:.1f}"
+            )
+            self.pcd_right_input.setText(
+                f"{components.hub.right_flange_diameter_mm:.1f}"
+            )
+            self.flange_left_input.setText(
+                f"{components.hub.left_flange_offset_mm:.1f}"
+            )
+            self.flange_right_input.setText(
+                f"{components.hub.right_flange_offset_mm:.1f}"
+            )
+            self.hole_dia_input.setText(
+                f"{components.hub.hole_diameter_mm:.1f}"
+            )
+            if components.hub.locknut_spacing_mm is None:
+                self.locknut_input.setText("")
+            else:
+                self.locknut_input.setText(
+                    f"{components.hub.locknut_spacing_mm:.1f}"
+                )
+            self.spoke_diameter_input.setText(
+                f"{components.spoke.diameter_mm:.2f}"
+            )
+
+            target_index = self.spokes_count_combo.findText(
+                str(components.rim.spoke_count)
+            )
+            if target_index < 0:
+                raise ValueError(
+                    "O cálculo não oferece "
+                    f"{components.rim.spoke_count} raios."
+                )
+            self.spokes_count_combo.setCurrentIndex(target_index)
+
+            self.current_components = components
+            self.calculate_spokes()
+            if self.last_sheet is not None:
+                self._update_component_summary(applied=True)
+                self.statusBar().showMessage(
+                    "Componentes aplicados e ficha recalculada.", 5000
+                )
+            else:
+                self.current_components = None
+                self._update_component_summary()
+        except (ValueError, TypeError) as exc:
+            QMessageBox.warning(self, "Biblioteca de componentes", str(exc))
+
+    @staticmethod
+    def _assembly_item_text(group, completed: bool) -> str:
+        prefix = "✓ " if completed else ""
+        return f"{prefix}{group.title} ({group.count} raios)"
+
+    def _set_assembly_plan(
+        self, plan: AssemblyPlan | None, reset: bool = True
+    ) -> None:
+        self.assembly_plan = plan
+        if reset:
+            self.assembly_completed.clear()
+
+        self._updating_assembly_list = True
+        try:
+            self.assembly_group_list.clear()
+            if plan is not None:
+                for group in plan.groups:
+                    self.assembly_group_list.addItem(
+                        self._assembly_item_text(
+                            group,
+                            group.number in self.assembly_completed,
+                        )
+                    )
+        finally:
+            self._updating_assembly_list = False
+
+        if plan is None:
+            self.assembly_text.setPlainText(
+                "O plano aparecerá aqui depois do cálculo."
+            )
+            self.assembly_progress.setText(
+                "Calcule os raios para gerar o plano."
+            )
+            if hasattr(self, "visualizer"):
+                self.visualizer.set_highlighted_indices(())
+            return
+
+        row = 0
+        for index, group in enumerate(plan.groups):
+            if group.number not in self.assembly_completed:
+                row = index
+                break
+        self.assembly_group_list.setCurrentRow(row)
+        self._show_assembly_group(row)
+        self._update_assembly_progress()
+
+    def _show_assembly_group(self, row: int) -> None:
+        if self._updating_assembly_list:
+            return
+        plan = self.assembly_plan
+        if plan is None or row < 0 or row >= len(plan.groups):
+            self.assembly_text.setPlainText(
+                "Selecione um conjunto para ver as instruções."
+            )
+            if hasattr(self, "visualizer"):
+                self.visualizer.set_highlighted_indices(())
+            self._update_assembly_progress()
+            return
+
+        group = plan.groups[row]
+        self.assembly_text.setPlainText(
+            plan.to_text(focus_group=group.number)
+        )
+        if hasattr(self, "visualizer"):
+            self.visualizer.set_highlighted_indices(group.spoke_indices)
+        self._update_assembly_progress()
+
+    def _update_assembly_progress(self) -> None:
+        plan = self.assembly_plan
+        if plan is None:
+            self.assembly_progress.setText(
+                "Calcule os raios para gerar o plano."
+            )
+            return
+        done = len(self.assembly_completed)
+        total = len(plan.groups)
+        row = self.assembly_group_list.currentRow()
+        if done >= total:
+            text = (
+                f"Montagem completa: {done} de {total} conjuntos concluídos. "
+                "Confira tensão e centralização."
+            )
+        elif 0 <= row < total:
+            text = (
+                f"Concluídos: {done} de {total} conjuntos. "
+                f"Conjunto atual: {plan.groups[row].number}."
+            )
+        else:
+            text = f"Concluídos: {done} de {total} conjuntos."
+        self.assembly_progress.setText(text)
+
+    def _refresh_assembly_list(self) -> None:
+        plan = self.assembly_plan
+        if plan is None:
+            return
+        row = self.assembly_group_list.currentRow()
+        self._updating_assembly_list = True
+        try:
+            for index, group in enumerate(plan.groups):
+                item = self.assembly_group_list.item(index)
+                if item is not None:
+                    item.setText(
+                        self._assembly_item_text(
+                            group,
+                            group.number in self.assembly_completed,
+                        )
+                    )
+        finally:
+            self._updating_assembly_list = False
+        if 0 <= row < self.assembly_group_list.count():
+            self.assembly_group_list.setCurrentRow(row)
+
+    def complete_assembly_group(self) -> None:
+        plan = self.assembly_plan
+        if plan is None:
+            self.statusBar().showMessage("Gere o plano primeiro.", 5000)
+            return
+        row = self.assembly_group_list.currentRow()
+        if row < 0 or row >= len(plan.groups):
+            return
+        group = plan.groups[row]
+        self.assembly_completed.add(group.number)
+        self._refresh_assembly_list()
+
+        next_row = next(
+            (
+                index
+                for index, candidate in enumerate(plan.groups)
+                if candidate.number not in self.assembly_completed
+            ),
+            None,
+        )
+        if next_row is not None:
+            self.assembly_group_list.setCurrentRow(next_row)
+            self._show_assembly_group(next_row)
+        else:
+            self._show_assembly_group(row)
+        self._update_assembly_progress()
+        self.statusBar().showMessage(
+            f"Conjunto {group.number} concluído.", 5000
+        )
+
+    def clear_assembly_progress(self) -> None:
+        if self.assembly_plan is None:
+            return
+        self.assembly_completed.clear()
+        self._refresh_assembly_list()
+        self.assembly_group_list.setCurrentRow(0)
+        self._show_assembly_group(0)
+        self._update_assembly_progress()
+        self.statusBar().showMessage(
+            "Progresso do assistente limpo.", 5000
+        )
+
+    def _clear_assembly_plan(self) -> None:
+        self._set_assembly_plan(None)
+
+    def generate_assembly_plan(self) -> None:
+        self.calculate_spokes()
+        if self.last_sheet is None:
+            return
+        if self.assembly_plan is None:
+            self.statusBar().showMessage(
+                "Plano indisponível para esta montagem.", 5000
+            )
+        else:
+            self.statusBar().showMessage(
+                "Plano dos 4 conjuntos gerado.", 5000
+            )
 
     def _selected_sim_index(self) -> int | None:
         try:
@@ -1368,7 +1868,12 @@ class WheelCalculatorApp(QMainWindow):
             diameter = self._parse_float(
                 self.spoke_diameter_input, "Diâmetro do raio"
             )
-            sheet = create_build_sheet(spec, target, diameter)
+            sheet = create_build_sheet(
+                spec,
+                target,
+                diameter,
+                components=self.current_components,
+            )
 
             if len(self.lat_offsets) != spec.spoke_count:
                 self.lat_offsets = [0.0] * spec.spoke_count
@@ -1383,6 +1888,13 @@ class WheelCalculatorApp(QMainWindow):
             self.visualizer.set_selected_index(self._selected_sim_index())
             self.centering_view.set_spec(spec)
             self.last_sheet = sheet
+            reset_plan = (
+                sheet.assembly_plan is None
+                or self.assembly_plan != sheet.assembly_plan
+            )
+            self._set_assembly_plan(
+                sheet.assembly_plan, reset=reset_plan
+            )
             try:
                 self.truing_state = self._ensure_truing_state(force=True)
                 physical_summary = self._truing_metrics_text(
@@ -1412,6 +1924,7 @@ class WheelCalculatorApp(QMainWindow):
             self.sheet_preview.setPlainText(
                 "Corrija os dados e calcule os raios para gerar a ficha."
             )
+            self._clear_assembly_plan()
             self.statusBar().showMessage(
                 "Corrija os dados e tente novamente.", 5000
             )
@@ -1615,6 +2128,7 @@ class WheelCalculatorApp(QMainWindow):
                     f"{spoke_count} raios: máximo {maximum}x; padrão ajustado.",
                     5000,
                 )
+        self._clear_assembly_plan()
         self.reset_sim()
 
     def _on_cross_changed(self) -> None:
@@ -1631,6 +2145,7 @@ class WheelCalculatorApp(QMainWindow):
             )
         else:
             self.statusBar().clearMessage()
+        self._clear_assembly_plan()
 
 
 def main() -> None:

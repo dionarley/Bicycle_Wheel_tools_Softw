@@ -7,9 +7,11 @@ O projeto começou como um protótipo de calculadora em PySide6. A Fase 0 separa
 a engenharia da interface, corrige os crashes do protótipo e cria uma base
 testável. A Fase 1 completa a calculadora, adiciona dish/centralização e gera
 uma ficha de montagem. A Fase 2 substitui o simulador didático por um solver
-elástico de alinhamento, com tensões, runout e sugestões de ajuste.
+elástico de alinhamento, com tensões, runout e sugestões de ajuste. A Fase 3
+adiciona a biblioteca de componentes e o assistente dos quatro conjuntos de
+montagem, integrados à ficha.
 
-## Estado atual (Fase 2)
+## Estado atual (Fase 3)
 
 - **Núcleo de cálculo puro em Python** (`wheel_lab/core/`), sem Qt e sem NumPy.
 - **Comprimento de raio** pela equação 1 de Brandt, por lado, com arredondamento
@@ -22,9 +24,16 @@ elástico de alinhamento, com tensões, runout e sugestões de ajuste.
   1/4 de volta ≈ 0,1134 mm).
 - **Dish/centralização**: offsets medidos do centro do cubo, deslocamento do
   plano do aro, distância entre locknuts e correção sugerida.
-- **Visualizador** com vista superior, corte axial, filtros por lado/sentido e
-  destaque do raio selecionado.
-- **Ficha de montagem** com resumo, JSON, Markdown e PDF.
+- **Visualizador** com vista superior, corte axial, filtros por lado/sentido,
+  destaque do raio selecionado e destaque do conjunto atual do assistente.
+- **Ficha de montagem** com resumo, JSON, Markdown e PDF, incluindo os
+  componentes selecionados e o plano dos quatro conjuntos.
+- **Biblioteca de componentes** (`wheel_lab/core/components.py`): presets de
+  aros, cubos, raios e niples, com validação de furação e medidas. A seleção
+  preenche o cálculo e fica registrada na ficha.
+- **Assistente dos quatro conjuntos** (`wheel_lab/core/assembly.py`): separa
+  esquerda/direita e leading/trailing, calcula os furos do aro e do flange,
+  mostra os pares raio → aro → cubo e acompanha o progresso da montagem.
 - **Solver físico de truing** (`wheel_lab/core/truing.py`): aro como anel
   elástico discretizado nos furos, com flexão lateral, flexão no plano e
   membrana (hoop); raios como molas axiais só-tração, com rigidez geométrica.
@@ -41,7 +50,8 @@ O modelo de truing é **incremental e linearizado**: parte da forma atual
 sugestões são um passo; aplique, recalcule e repita, como no alinhamento real.
 As propriedades padrão do aro são rigidezes equivalentes de um aro de alumínio
 de perfil médio, não a geometria literal da seção. O solver exige número de
-raios múltiplo de 4, pois usa a tabela de montagem.
+raios múltiplo de 4, pois usa a tabela de montagem. O assistente também exige
+múltiplo de 4, para que os quatro conjuntos tenham o mesmo número de raios.
 
 ## Instalação
 
@@ -141,6 +151,8 @@ wheel_lab/
     spoke_length.py       # equação 1 e arredondamento
     lacing.py             # tabela de raios para desenho
     tension.py            # razão L/R, alvo, alongamento, tom, pneu
+    components.py         # biblioteca de aros, cubos, raios e niples
+    assembly.py           # assistente dos 4 conjuntos e plano de montagem
     build_sheet.py        # ficha, JSON, Markdown e HTML/PDF
     truing.py             # solver elástico, runout, tensões e sugestões
     units.py              # TPI, voltas ↔ mm
@@ -148,6 +160,8 @@ tests/
   test_spoke_length.py
   test_centering.py
   test_build_sheet.py
+  test_components.py
+  test_assembly.py
   test_geometry.py
   test_tension.py
   test_lacing.py
@@ -185,6 +199,41 @@ T_esq / T_dir = (offset_dir / L_dir) / (offset_esq / L_esq)
 Compressão do aro (eq. 7), alongamento (eq. 3), tom de corda fixa e constrição
 do pneu (eq. 8) estão em `wheel_lab/core/tension.py`.
 
+## Assistente dos 4 conjuntos (Fase 3)
+
+O padrão usado no projeto separa os raios em quatro conjuntos: esquerda
+leading, direita leading, esquerda trailing e direita trailing. Para uma roda de
+`N` raios, com `N` múltiplo de 4, cada conjunto tem `N/4` raios. O assistente:
+
+- numera os furos do aro de 1 a `N`, começando no primeiro furo de raio ao lado
+  da válvula;
+- numera os furos de cada flange de 1 a `N/2`;
+- usa um furo de aro a cada quatro furos para o mesmo conjunto e um furo de
+  flange a cada dois furos;
+- mostra a tabela raio → furo do aro → furo do cubo, com o deslocamento
+  `T = 720·X/N`;
+- avisa em montagem radial, em `T = 90°` e quando a distância entre locknuts
+  não foi informada;
+- destaca o conjunto atual no visualizador e permite marcar cada conjunto como
+  concluído.
+
+A numeração dos furos é **relativa**: comece no primeiro furo de raio ao lado da
+válvula e mantenha o mesmo sentido em toda a montagem. O entrelaçamento e a
+direção de inserção dos raios (cabeça dentro ou fora do flange) dependem do cubo;
+mantenha o padrão escolhido. O assistente é esquemático e não substitui as
+instruções do fabricante do aro, do cubo ou do raio.
+
+A biblioteca de componentes (`wheel_lab/core/components.py`) traz presets de
+aros, cubos, raios e niples. Ao aplicar uma seleção, as medidas preenchem o
+cálculo e o conjunto fica registrado na ficha. Os presets são exemplos de
+referência, não um catálogo: confira sempre o ERD real, a furação, os offsets e
+o comprimento do raio antes de comprar ou montar. A ficha em JSON, Markdown e
+HTML/PDF inclui os componentes aplicados e o plano completo dos quatro
+conjuntos; se as medidas editadas não coincidirem com os componentes
+selecionados, a ficha mostra avisos. Na API, `ComponentSet.to_spec()` gera um
+`WheelSpec` e `create_build_sheet(..., components=...)` registra o conjunto e
+cria o `assembly_plan` automaticamente.
+
 ## Modelo de alinhamento (Fase 2)
 
 O aro é discretizado nos furos dos raios, com dois graus de liberdade por nó:
@@ -219,11 +268,12 @@ inspeção e do tensiômetro.
 - **Fase 0 (concluída)**: núcleo, validação, testes, correções de UI.
 - **Fase 1 (concluída)**: calculadora completa, visualizador de montagem,
   dish/centralização e build sheet em JSON/Markdown/PDF.
-- **Fase 2 (atual)**: solver físico de truing (aro como anel + raios como
+- **Fase 2 (concluída)**: solver físico de truing (aro como anel + raios como
   molas só-tração), tensão, runout e sugestões de ajuste.
-- **Fase 3**: assistente dos 4 conjuntos de montagem, biblioteca de componentes
-  e integração com o build sheet.
-- **Fase 4**: rigidez/FEM, leitura de tom por microfone e diagnóstico avançado.
+- **Fase 3 (concluída)**: assistente dos 4 conjuntos de montagem, biblioteca de
+  componentes e integração com o build sheet.
+- **Fase 4 (próxima)**: rigidez/FEM, leitura de tom por microfone e diagnóstico
+  avançado.
 
 ## Referência e direitos autorais
 

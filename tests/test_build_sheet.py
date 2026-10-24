@@ -2,7 +2,12 @@ import json
 
 import pytest
 
-from wheel_lab.core import Side, WheelSpec, create_build_sheet
+from wheel_lab.core import (
+    Side,
+    WheelSpec,
+    create_build_sheet,
+    default_component_library,
+)
 
 
 def make_spec(**overrides):
@@ -51,6 +56,52 @@ def test_build_sheet_markdown_and_html():
     assert "<table>" in html
     assert "300,62 mm" in html
     assert "299,13 mm" in html
+    assert "## Assistente de montagem" in markdown
+    assert "Assistente de montagem" in html
+
+
+def test_build_sheet_includes_components_and_assembly():
+    components = default_component_library().default_set()
+    spec = components.to_spec(crossings=3)
+    sheet = create_build_sheet(
+        spec,
+        1000.0,
+        components.spoke.diameter_mm,
+        components=components,
+    )
+    assert sheet.components is components
+    assert sheet.assembly_plan is not None
+    assert sheet.warnings() == []
+
+    payload = sheet.to_dict()
+    assert payload["components"]["rim"]["name"] == components.rim.name
+    assert payload["assembly"]["wheel"]["spoke_count"] == 32
+    assert len(payload["assembly"]["groups"]) == 4
+
+    markdown = sheet.to_markdown()
+    html = sheet.to_html()
+    assert "## Componentes" in markdown
+    assert components.rim.name in markdown
+    assert "## Assistente de montagem" in markdown
+    assert components.rim.name in html
+    assert "Assistente de montagem" in html
+
+
+def test_build_sheet_warns_about_component_mismatch():
+    components = default_component_library().default_set()
+    sheet = create_build_sheet(
+        make_spec(), 1000.0, 2.0, components=components
+    )
+    warnings = sheet.warnings()
+    assert any("ERD" in warning for warning in warnings)
+    assert any("diâmetro" in warning.lower() for warning in warnings)
+
+
+def test_build_sheet_without_assembly_for_non_multiple_of_four():
+    sheet = create_build_sheet(make_spec(spoke_count=30), 1000.0, 2.0)
+    assert sheet.assembly_plan is None
+    assert any("múltiplo de 4" in warning for warning in sheet.warnings())
+    assert "## Assistente de montagem" not in sheet.to_markdown()
 
 
 def test_build_sheet_reports_dish_warning():

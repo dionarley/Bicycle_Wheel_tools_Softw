@@ -196,3 +196,91 @@ def test_apply_suggestions_without_suggestion_is_safe(qt_app):
     window.apply_sim_suggestions()
     assert "Nenhuma sugestão" in window.info_text.toPlainText()
     window.close()
+
+
+def test_assembly_tab_generates_plan_and_highlights(qt_app):
+    window = appmod.WheelCalculatorApp()
+    assert "Assistente de montagem" in [
+        window.tabs.tabText(index) for index in range(window.tabs.count())
+    ]
+    window.calculate_spokes()
+
+    plan = window.assembly_plan
+    assert plan is not None
+    assert len(plan.groups) == 4
+    assert window.assembly_group_list.count() == 4
+    assert window.visualizer.highlighted_indices == set(
+        plan.groups[0].spoke_indices
+    )
+
+    window.assembly_group_list.setCurrentRow(2)
+    assert window.visualizer.highlighted_indices == set(
+        plan.groups[2].spoke_indices
+    )
+    assert "Conjunto 3 de 4" in window.assembly_text.toPlainText()
+
+    window.complete_assembly_group()
+    assert 3 in window.assembly_completed
+    assert "✓ Conjunto 3" in window.assembly_group_list.item(2).text()
+    assert "1 de 4" in window.assembly_progress.text()
+
+    window.clear_assembly_progress()
+    assert window.assembly_completed == set()
+    assert "✓" not in window.assembly_group_list.item(2).text()
+
+    window.visualizer.resize(420, 420)
+    window.visualizer.grab()
+    window.close()
+
+
+def test_component_library_applies_and_build_sheet_includes(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.component_rim_combo.setCurrentText(
+        "Aro 700c alumínio 36h (ERD 602 mm)"
+    )
+    # A seleção do aro sincroniza o cubo para a mesma furação.
+    assert "36h" in window.component_hub_combo.currentText()
+
+    window.apply_components()
+    assert window.spokes_count_combo.currentText() == "36"
+    assert window.current_components is not None
+    assert window.current_components.rim.spoke_count == 36
+
+    sheet = window.last_sheet
+    assert sheet is not None
+    assert sheet.components is window.current_components
+    assert sheet.assembly_plan is not None
+    assert len(sheet.assembly_plan.groups) == 4
+    assert sheet.warnings() == []
+
+    preview = window.sheet_preview.toPlainText()
+    assert "Componentes" in preview
+    assert "Assistente de montagem" in preview
+    assert "Aro 700c alumínio 36h" in preview
+    assert "aplicados" in window.component_summary.text()
+    window.close()
+
+
+def test_component_selection_syncs_rim_and_hub_counts(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.component_rim_combo.setCurrentText(
+        "Aro 700c carbono 24h (ERD 595 mm)"
+    )
+    assert "24h" in window.component_hub_combo.currentText()
+
+    window.component_hub_combo.setCurrentText(
+        "Cubo traseiro 32h, 130 mm (PCD 45/45, offsets 35/19)"
+    )
+    assert "32h" in window.component_rim_combo.currentText()
+    assert window.current_components is None
+    window.close()
+
+
+def test_assembly_actions_without_plan_are_safe(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.complete_assembly_group()
+    window.clear_assembly_progress()
+    window._show_assembly_group(0)
+    assert "Selecione um conjunto" in window.assembly_text.toPlainText()
+    assert "Gere o plano primeiro" in window.statusBar().currentMessage()
+    window.close()

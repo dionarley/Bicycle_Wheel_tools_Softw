@@ -5,7 +5,17 @@ dataclasses, validações e fórmulas. Isso permite testar a engenharia da roda
 sem abrir uma janela.
 """
 
+from .assembly import AssemblyGroup, AssemblyPlan, build_assembly_plan
 from .build_sheet import BuildSheet, create_build_sheet
+from .components import (
+    ComponentLibrary,
+    ComponentSet,
+    HubComponent,
+    NippleComponent,
+    RimComponent,
+    SpokeComponent,
+    default_component_library,
+)
 from .geometry import (
     erd_from_outer_diameter,
     is_valid_cross_pattern,
@@ -65,9 +75,17 @@ __all__ = [
     "SPOKE_THREAD_PITCH_MM",
     "SPOKE_ELASTIC_MODULUS_MPA",
     "SLACK_TOLERANCE_N",
+    "AssemblyGroup",
+    "AssemblyPlan",
     "BuildSheet",
+    "ComponentLibrary",
+    "ComponentSet",
+    "HubComponent",
+    "NippleComponent",
+    "RimComponent",
     "RimElasticProperties",
     "Side",
+    "SpokeComponent",
     "SpokeGeometry",
     "Spoke",
     "SpokeDirection",
@@ -77,10 +95,12 @@ __all__ = [
     "TruingState",
     "TruingSuggestion",
     "WheelSpec",
+    "build_assembly_plan",
     "build_spoke_geometries",
     "build_spoke_table",
     "calculate_spoke_lengths",
     "create_build_sheet",
+    "default_component_library",
     "erd_from_outer_diameter",
     "inch_to_mm",
     "is_valid_cross_pattern",

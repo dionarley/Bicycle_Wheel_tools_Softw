@@ -9,6 +9,8 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 
+from .assembly import AssemblyPlan, build_assembly_plan
+from .components import ComponentSet
 from .models import Side, SpokeLengthResult, WheelSpec
 from .spoke_length import calculate_spoke_lengths
 from .tension import (
@@ -53,6 +55,8 @@ class BuildSheet:
     tone_right_hz: float
     created_at: datetime
     notes: str = ""
+    components: ComponentSet | None = None
+    assembly_plan: AssemblyPlan | None = None
 
     @property
     def tighter_side(self) -> Side:
@@ -91,7 +95,25 @@ class BuildSheet:
                 "A distância entre locknuts é menor ou igual à distância entre "
                 "flanges; confira as medidas do cubo."
             )
-        return warnings
+        if self.components is not None:
+            warnings.extend(
+                self.components.compatibility_warnings(
+                    self.spec, self.spoke_diameter_mm
+                )
+            )
+        if self.assembly_plan is None:
+            if self.spec.spoke_count % 4 != 0:
+                warnings.append(
+                    "Assistente de montagem indisponível: ele exige número de "
+                    "raios múltiplo de 4."
+                )
+            else:
+                warnings.append(
+                    "Assistente de montagem indisponível para esta montagem."
+                )
+        else:
+            warnings.extend(self.assembly_plan.warnings)
+        return list(dict.fromkeys(warnings))
 
     def to_summary_text(self) -> str:
         """Resumo curto para o painel da interface."""
@@ -147,6 +169,21 @@ class BuildSheet:
             lines.append(
                 f"Distância entre locknuts: "
                 f"{_fmt(self.spec.locknut_spacing_mm, 1)} mm"
+            )
+        if self.components is not None:
+            lines.extend(["", "=== COMPONENTES ==="])
+            lines.extend(self.components.summary_lines())
+        if self.assembly_plan is not None:
+            lines.extend(
+                [
+                    "",
+                    "=== ASSISTENTE DE MONTAGEM ===",
+                    (
+                        f"4 conjuntos de {self.assembly_plan.group_size} raios; "
+                        f"T = {_fmt(self.assembly_plan.angle_deg, 1)}°."
+                    ),
+                    "Veja a aba 'Assistente de montagem' ou a ficha completa.",
+                ]
             )
         warnings = self.warnings()
         if warnings:
@@ -223,6 +260,14 @@ class BuildSheet:
             },
             "warnings": self.warnings(),
             "notes": self.notes,
+            "components": (
+                self.components.to_dict() if self.components is not None else None
+            ),
+            "assembly": (
+                self.assembly_plan.to_dict()
+                if self.assembly_plan is not None
+                else None
+            ),
         }
 
     def to_markdown(self) -> str:
@@ -319,6 +364,24 @@ class BuildSheet:
                 "",
             ]
         )
+        if self.components is not None:
+            insert_at = lines.index("## Comprimentos")
+            component_lines = [
+                "## Componentes",
+                "",
+                *[f"- {line}" for line in self.components.summary_lines()],
+                "",
+            ]
+            lines[insert_at:insert_at] = component_lines
+        if self.assembly_plan is not None:
+            insert_at = lines.index("## Avisos")
+            assembly_lines = (
+                self.assembly_plan.to_markdown(
+                    include_warnings=False
+                ).splitlines()
+                + [""]
+            )
+            lines[insert_at:insert_at] = assembly_lines
         return "\n".join(lines)
 
     def to_html(self) -> str:
@@ -334,6 +397,18 @@ class BuildSheet:
             else "<p class='ok'>Nenhum aviso.</p>"
         )
         notes = escape(self.notes) if self.notes else "—"
+        components_html = ""
+        if self.components is not None:
+            component_items = "".join(
+                f"<li>{escape(line)}</li>"
+                for line in self.components.summary_lines()
+            )
+            components_html = f"<h2>Componentes</h2><ul>{component_items}</ul>"
+        assembly_html = (
+            self.assembly_plan.to_html(include_warnings=False)
+            if self.assembly_plan is not None
+            else ""
+        )
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -365,6 +440,8 @@ class BuildSheet:
 <tr><th>Diâmetro do raio</th><td>{_fmt(self.spoke_diameter_mm, 2)} mm</td></tr>
 </table>
 
+{components_html}
+
 <h2>Comprimentos</h2>
 <table>
 <tr><th>Lado</th><th>Comprimento</th><th>Comprar</th></tr>
@@ -387,6 +464,8 @@ class BuildSheet:
 <tr><th>Correção</th><td>{escape(self.centering_action)}</td></tr>
 <tr><th>Flanges (do plano do aro)</th><td>{_fmt(spec.effective_left_offset_mm, 1)} / {_fmt(spec.effective_right_offset_mm, 1)} mm</td></tr>
 </table>
+
+{assembly_html}
 
 <h2>Avisos</h2>
 {warning_html}
@@ -414,6 +493,7 @@ def create_build_sheet(
     spoke_diameter_mm: float,
     notes: str = "",
     created_at: datetime | None = None,
+    components: ComponentSet | None = None,
 ) -> BuildSheet:
     """Calcula a montagem completa e devolve uma ficha pronta."""
 
@@ -423,6 +503,8 @@ def create_build_sheet(
         raise ValueError("O diâmetro do raio deve ser um número positivo.")
 
     spec.validate()
+    if components is not None:
+        components.validate()
     result = calculate_spoke_lengths(spec)
     ratio = lateral_tension_ratio(
         spec.effective_left_offset_mm,
@@ -461,4 +543,13 @@ def create_build_sheet(
         ),
         created_at=created_at or datetime.now(),
         notes=notes,
+        components=components,
+        assembly_plan=_safe_assembly_plan(spec),
     )
+
+
+def _safe_assembly_plan(spec: WheelSpec) -> AssemblyPlan | None:
+    try:
+        return build_assembly_plan(spec)
+    except ValueError:
+        return None
