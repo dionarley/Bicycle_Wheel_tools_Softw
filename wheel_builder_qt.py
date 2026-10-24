@@ -2,8 +2,8 @@
 """Wheel Lab — calculador e alinhador de rodas de bicicleta.
 
 Fase 1: calculadora completa, visualizador de montagem, dish/centralização e
-ficha de montagem (JSON, Markdown e PDF). O simulador de alinhamento ainda é
-didático; o solver físico (aro + raios) entra na Fase 2.
+ficha de montagem (JSON, Markdown e PDF). Fase 2: solver elástico de truing
+(aro + raios só-tração), tensões, runout e sugestões de ajuste.
 """
 
 from __future__ import annotations
@@ -51,6 +51,8 @@ from wheel_lab.core import (
     BuildSheet,
     Side,
     SpokeDirection,
+    TruingState,
+    TruingSuggestion,
     WheelSpec,
     build_spoke_table,
     create_build_sheet,
@@ -696,6 +698,8 @@ class WheelCalculatorApp(QMainWindow):
         self.lat_offsets: list[float] = []
         self.rad_offsets: list[float] = []
         self.last_sheet: BuildSheet | None = None
+        self.truing_state: TruingState | None = None
+        self.last_suggestion: TruingSuggestion | None = None
 
         self._build_ui()
         self.reset_sim()
@@ -923,11 +927,25 @@ class WheelCalculatorApp(QMainWindow):
         form.addRow("Índice do raio (0 a N-1):", self.sim_spoke_idx)
         form.addRow("Ajuste no niple:", self.sim_turn_val)
         layout.addLayout(form)
+
+        self.sim_selected_info = QLabel("Selecione um raio para ver a tensão.")
+        self.sim_selected_info.setWordWrap(True)
+        self.sim_selected_info.setStyleSheet("color: #555;")
+        layout.addWidget(self.sim_selected_info)
         self.sim_spoke_idx.textChanged.connect(self._on_sim_index_changed)
 
         apply_btn = QPushButton("Aplicar ajuste")
         apply_btn.clicked.connect(self.apply_sim_adjustment)
         layout.addWidget(apply_btn)
+
+        suggest_btn = QPushButton("Sugerir ajustes")
+        suggest_btn.clicked.connect(self.suggest_sim_adjustments)
+        layout.addWidget(suggest_btn)
+
+        self.apply_suggestions_btn = QPushButton("Aplicar sugestões")
+        self.apply_suggestions_btn.clicked.connect(self.apply_sim_suggestions)
+        self.apply_suggestions_btn.setEnabled(False)
+        layout.addWidget(self.apply_suggestions_btn)
 
         reset_btn = QPushButton("Resetar desvios da roda")
         reset_btn.clicked.connect(self.reset_sim)
@@ -938,9 +956,11 @@ class WheelCalculatorApp(QMainWindow):
         layout.addWidget(example_btn)
 
         note = QLabel(
-            "Modelo didático. O ajuste de niple move o raio e os vizinhos com "
-            "um fator fixo; ainda não há equilíbrio elástico do aro nem tensão. "
-            "O solver físico entra na Fase 2."
+            "Modelo físico da Fase 2: o aro é um anel elástico (flexão lateral, "
+            "flexão no plano e hoop) e cada raio é uma mola só-tração. O ajuste "
+            "encurta o comprimento livre do raio; o equilíbrio é resolvido e "
+            "raios frouxos são desativados. As sugestões são um passo "
+            "linearizado: aplique, recalcule e repita."
         )
         note.setWordWrap(True)
         note.setStyleSheet("color: #555;")
@@ -997,6 +1017,157 @@ class WheelCalculatorApp(QMainWindow):
     def _on_sim_index_changed(self, *args) -> None:
         if hasattr(self, "visualizer"):
             self.visualizer.set_selected_index(self._selected_sim_index())
+        if hasattr(self, "sim_selected_info"):
+            self._update_selected_spoke_info()
+
+    def _current_truing_inputs(self) -> tuple[WheelSpec, float, float]:
+        spec = self._read_spec()
+        target = self._parse_float(
+            self.target_tension_input, "Tensão alvo"
+        )
+        diameter = self._parse_float(
+            self.spoke_diameter_input, "Diâmetro do raio"
+        )
+        return spec, target, diameter
+
+    def _ensure_truing_state(self, force: bool = False) -> TruingState:
+        """Cria ou reutiliza o estado físico compatível com os campos atuais."""
+
+        spec, target, diameter = self._current_truing_inputs()
+        count = spec.spoke_count
+        if len(self.lat_offsets) != count:
+            self.lat_offsets = [0.0] * count
+        if len(self.rad_offsets) != count:
+            self.rad_offsets = [0.0] * count
+
+        state = self.truing_state
+        needs_new = (
+            force
+            or state is None
+            or state.spec != spec
+            or abs(state.target_tension_n - target) > 1e-9
+            or abs(state.spoke_diameter_mm - diameter) > 1e-9
+            or len(state.lateral_mm) != count
+        )
+        if needs_new:
+            state = TruingState(
+                spec,
+                target,
+                diameter,
+                initial_lateral_mm=self.lat_offsets,
+                initial_radial_mm=self.rad_offsets,
+            )
+            self.truing_state = state
+            self.last_suggestion = None
+            if hasattr(self, "apply_suggestions_btn"):
+                self.apply_suggestions_btn.setEnabled(False)
+        return state
+
+    def _refresh_truing_view(self, state: TruingState) -> None:
+        self.lat_offsets = list(state.lateral_mm)
+        self.rad_offsets = list(state.radial_mm)
+        self.visualizer.set_wheel(
+            state.spec.spoke_count,
+            state.spec.crossings,
+            state.spec.erd_mm,
+            self.lat_offsets,
+            self.rad_offsets,
+        )
+        self._on_sim_index_changed()
+
+    @staticmethod
+    def _truing_metrics_text(state: TruingState) -> str:
+        slack = (
+            "nenhum"
+            if not state.slack_indices
+            else ", ".join(str(index) for index in state.slack_indices)
+        )
+        return (
+            f"Runout lateral: {_fmt(state.lateral_runout_mm, 2)} mm\n"
+            f"Runout radial: {_fmt(state.radial_runout_mm, 2)} mm\n"
+            f"Tensões: {_fmt(state.min_tension_n, 0)} a "
+            f"{_fmt(state.max_tension_n, 0)} N\n"
+            f"Raios frouxos: {slack}"
+        )
+
+    def _update_selected_spoke_info(self) -> None:
+        index = self._selected_sim_index()
+        if index is None:
+            self.sim_selected_info.setText(
+                "Índice inválido. Use um valor entre 0 e N-1."
+            )
+            return
+        try:
+            spoke_count = int(self.spokes_count_combo.currentText())
+            crossings = int(self.cross_combo.currentData())
+            spokes = build_spoke_table(spoke_count, crossings)
+        except (ValueError, TypeError) as exc:
+            self.sim_selected_info.setText(f"Erro: {exc}")
+            return
+        spoke = spokes[index]
+        text = (
+            f"Raio {index}: {spoke.side.label_pt}, "
+            f"{spoke.direction.label_pt}"
+        )
+        state = self.truing_state
+        if state is not None and len(state.geometries) == len(spokes):
+            tension = state.tensions_n[index]
+            status = "" if state.active[index] else " (frouxo)"
+            text += f" — tensão {_fmt(tension, 0)} N{status}"
+        self.sim_selected_info.setText(text)
+
+    def _format_suggestion(self, suggestion: TruingSuggestion) -> str:
+        lines = [
+            "=== SUGESTÕES DE AJUSTE (modelo físico) ===",
+            f"Runout atual: lateral "
+            f"{_fmt(suggestion.current_lateral_runout_mm, 2)} mm; radial "
+            f"{_fmt(suggestion.current_radial_runout_mm, 2)} mm",
+            "",
+        ]
+        if suggestion.adjustments:
+            lines.append("Ajustes sugeridos (positivo = apertar):")
+            for position, adjustment in enumerate(
+                suggestion.adjustments[:12], start=1
+            ):
+                turns = f"{adjustment.turns:+.2f}".replace(".", ",")
+                lines.append(
+                    f"  {position:2d}. raio {adjustment.index:2d} "
+                    f"({adjustment.side.label_pt}, "
+                    f"{adjustment.direction.label_pt}): {turns} volta(s) "
+                    f"→ tensão prevista "
+                    f"{_fmt(adjustment.predicted_tension_n, 0)} N"
+                )
+            remaining = len(suggestion.adjustments) - 12
+            if remaining > 0:
+                lines.append(f"  ... e mais {remaining} raio(s).")
+        else:
+            lines.append(
+                "Nenhum ajuste acima do mínimo; a roda já está próxima do alvo."
+            )
+
+        lines.extend(
+            [
+                "",
+                f"Runout previsto: lateral "
+                f"{_fmt(suggestion.predicted_lateral_runout_mm, 2)} mm; radial "
+                f"{_fmt(suggestion.predicted_radial_runout_mm, 2)} mm",
+                f"Tensões previstas: "
+                f"{_fmt(min(suggestion.predicted_tensions_n), 0)} a "
+                f"{_fmt(max(suggestion.predicted_tensions_n), 0)} N",
+            ]
+        )
+        if suggestion.warnings:
+            lines.append("")
+            lines.append("Avisos:")
+            lines.extend(f"• {warning}" for warning in suggestion.warnings)
+        if suggestion.adjustments:
+            lines.extend(
+                [
+                    "",
+                    "Aplique as sugestões e recalcule; o modelo é linearizado.",
+                ]
+            )
+        return "\n".join(lines)
 
     def _update_view_flags(self, *args) -> None:
         if hasattr(self, "visualizer"):
@@ -1212,11 +1383,31 @@ class WheelCalculatorApp(QMainWindow):
             self.visualizer.set_selected_index(self._selected_sim_index())
             self.centering_view.set_spec(spec)
             self.last_sheet = sheet
-            self.info_text.setPlainText(sheet.to_summary_text())
+            try:
+                self.truing_state = self._ensure_truing_state(force=True)
+                physical_summary = self._truing_metrics_text(
+                    self.truing_state
+                )
+            except ValueError as exc:
+                self.truing_state = None
+                self.last_suggestion = None
+                self.apply_suggestions_btn.setEnabled(False)
+                physical_summary = f"Modelo físico indisponível: {exc}"
+            self.info_text.setPlainText(
+                sheet.to_summary_text()
+                + "\n\n=== MODELO FÍSICO ===\n"
+                + physical_summary
+            )
             self.sheet_preview.setMarkdown(sheet.to_markdown())
+            self._on_sim_index_changed()
             self.statusBar().showMessage("Cálculo concluído.", 5000)
         except ValueError as exc:
             self.last_sheet = None
+            self.truing_state = None
+            self.last_suggestion = None
+            if hasattr(self, "apply_suggestions_btn"):
+                self.apply_suggestions_btn.setEnabled(False)
+            self._on_sim_index_changed()
             self.info_text.setPlainText(f"Erro: {exc}")
             self.sheet_preview.setPlainText(
                 "Corrija os dados e calcule os raios para gerar a ficha."
@@ -1227,116 +1418,184 @@ class WheelCalculatorApp(QMainWindow):
 
     def reset_sim(self) -> None:
         try:
-            spoke_count = int(self.spokes_count_combo.currentText())
-            crossings = int(self.cross_combo.currentData())
-            build_spoke_table(spoke_count, crossings)
-            erd = self._safe_float(self.erd_input, 600.0)
-
-            self.lat_offsets = [0.0] * spoke_count
-            self.rad_offsets = [0.0] * spoke_count
-            self.visualizer.set_wheel(
-                spoke_count,
-                crossings,
-                erd,
-                self.lat_offsets,
-                self.rad_offsets,
+            spec, target, diameter = self._current_truing_inputs()
+            state = TruingState(
+                spec,
+                target,
+                diameter,
+                initial_lateral_mm=[0.0] * spec.spoke_count,
+                initial_radial_mm=[0.0] * spec.spoke_count,
             )
-            self._on_sim_index_changed()
+            self.truing_state = state
+            self.last_suggestion = None
+            self.apply_suggestions_btn.setEnabled(False)
+            self._refresh_truing_view(state)
+            left_target = next(
+                geometry.initial_tension_n
+                for geometry in state.geometries
+                if geometry.side is Side.LEFT
+            )
+            right_target = next(
+                geometry.initial_tension_n
+                for geometry in state.geometries
+                if geometry.side is Side.RIGHT
+            )
             self.info_text.setPlainText(
-                f"Simulador resetado: {spoke_count} raios, {crossings}x, "
-                "sem desvios.\n"
-                "Use 'Carregar exemplo de empeno' para ver um caso didático "
-                "ou aplique um ajuste de niple."
+                f"Simulador físico resetado: {spec.spoke_count} raios, "
+                f"{spec.crossings}x, sem desvios.\n"
+                f"Tensões alvo: esquerda {_fmt(left_target, 0)} N; "
+                f"direita {_fmt(right_target, 0)} N.\n"
+                "Use 'Carregar exemplo de empeno' ou aplique um ajuste."
             )
         except (ValueError, TypeError) as exc:
+            self.truing_state = None
+            self.last_suggestion = None
+            if hasattr(self, "apply_suggestions_btn"):
+                self.apply_suggestions_btn.setEnabled(False)
             self.info_text.setPlainText(f"Erro: {exc}")
 
     def load_example(self) -> None:
         try:
-            spoke_count = int(self.spokes_count_combo.currentText())
-            crossings = int(self.cross_combo.currentData())
-            build_spoke_table(spoke_count, crossings)
-            erd = self._safe_float(self.erd_input, 600.0)
-
-            self.lat_offsets = [
-                1.5 * math.sin(2.0 * math.pi * index / spoke_count)
-                for index in range(spoke_count)
+            spec, target, diameter = self._current_truing_inputs()
+            count = spec.spoke_count
+            lateral = [
+                0.6 * math.sin(2.0 * math.pi * index / count)
+                for index in range(count)
             ]
-            self.rad_offsets = [
-                0.8 * math.cos(4.0 * math.pi * index / spoke_count)
-                for index in range(spoke_count)
+            radial = [
+                0.3 * math.cos(4.0 * math.pi * index / count)
+                for index in range(count)
             ]
-            self.visualizer.set_wheel(
-                spoke_count,
-                crossings,
-                erd,
-                self.lat_offsets,
-                self.rad_offsets,
+            state = TruingState(
+                spec,
+                target,
+                diameter,
+                initial_lateral_mm=lateral,
+                initial_radial_mm=radial,
             )
-            self._on_sim_index_changed()
+            self.truing_state = state
+            self.last_suggestion = None
+            self.apply_suggestions_btn.setEnabled(False)
+            self._refresh_truing_view(state)
             self.info_text.setPlainText(
-                "Exemplo didático carregado:\n"
-                "• Desvio lateral de ±1,5 mm (seno de uma volta).\n"
-                "• Desvio radial de ±0,8 mm (cosseno de duas voltas).\n"
+                "Exemplo de runout carregado (entrada didática; o solver "
+                "calcula a resposta física):\n"
+                "• Desvio lateral de ±0,6 mm (seno de uma volta).\n"
+                "• Desvio radial de ±0,3 mm (cosseno de duas voltas).\n"
+                f"• Runout lateral: {_fmt(state.lateral_runout_mm, 2)} mm; "
+                f"radial: {_fmt(state.radial_runout_mm, 2)} mm.\n"
                 "• Deslocamentos exagerados 20× no desenho.\n\n"
-                "Isto não é um resultado físico; serve para testar o visualizador."
+                "Use 'Sugerir ajustes' para calcular um passo de truing."
             )
         except (ValueError, TypeError) as exc:
             self.info_text.setPlainText(f"Erro: {exc}")
 
     def apply_sim_adjustment(self) -> None:
         try:
-            spoke_count = int(self.spokes_count_combo.currentText())
-            crossings = int(self.cross_combo.currentData())
-            spokes = build_spoke_table(spoke_count, crossings)
-
+            state = self._ensure_truing_state()
             index = int(self.sim_spoke_idx.text().strip())
-            if not 0 <= index < spoke_count:
+            if not 0 <= index < len(state.geometries):
                 raise ValueError(
-                    f"O índice deve estar entre 0 e {spoke_count - 1}."
+                    f"O índice deve estar entre 0 e "
+                    f"{len(state.geometries) - 1}."
                 )
 
             turns = self.sim_turn_val.currentData()
             if turns is None:
                 raise ValueError("Selecione um ajuste de niple.")
-            delta_mm = turns_to_mm(float(turns))
+            turns_value = float(turns)
+            delta_mm = turns_to_mm(turns_value)
+            geometry = state.geometries[index]
+            tension_before = state.tensions_n[index]
+            result = state.apply_turns({index: turns_value})
 
-            if len(self.lat_offsets) != spoke_count:
-                self.lat_offsets = [0.0] * spoke_count
-            if len(self.rad_offsets) != spoke_count:
-                self.rad_offsets = [0.0] * spoke_count
+            self.last_suggestion = None
+            self.apply_suggestions_btn.setEnabled(False)
+            self._refresh_truing_view(state)
 
-            spoke = spokes[index]
-            side_sign = spoke.side.sign
-
-            # Modelo didático: apertar puxa o aro para dentro e para o lado
-            # do flange; os vizinhos recebem uma fração do movimento.
-            self.rad_offsets[index] -= delta_mm
-            self.lat_offsets[index] += side_sign * delta_mm * 0.35
-            for neighbor in ((index - 1) % spoke_count, (index + 1) % spoke_count):
-                self.rad_offsets[neighbor] -= 0.15 * delta_mm
-                self.lat_offsets[neighbor] += side_sign * 0.10 * delta_mm
-
-            erd = self._safe_float(self.erd_input, 600.0)
-            self.visualizer.set_wheel(
-                spoke_count,
-                crossings,
-                erd,
-                self.lat_offsets,
-                self.rad_offsets,
+            tension_after = result.tensions_n[index]
+            slack_text = (
+                "nenhum"
+                if not result.slack_indices
+                else ", ".join(str(value) for value in result.slack_indices)
             )
-            self._on_sim_index_changed()
-
-            lateral_max = max(abs(value) for value in self.lat_offsets)
-            radial_range = max(self.rad_offsets) - min(self.rad_offsets)
+            turns_text = f"{turns_value:+.2f}".replace(".", ",")
+            delta_text = f"{delta_mm:+.3f}".replace(".", ",")
             self.info_text.setPlainText(
-                f"Ajuste aplicado no raio {index} "
-                f"({spoke.side.label_pt}, {spoke.direction.label_pt}):\n"
-                f"• {float(turns):+.2f} volta(s) = {delta_mm:+.3f} mm\n"
-                f"• Desvio lateral máximo: {_fmt(lateral_max, 2)} mm\n"
-                f"• Faixa radial (máx - mín): {_fmt(radial_range, 2)} mm\n\n"
-                "Modelo didático: o aro ainda não é resolvido por equilíbrio "
-                "elástico e a tensão não é calculada."
+                f"Ajuste físico aplicado no raio {index} "
+                f"({geometry.side.label_pt}, "
+                f"{geometry.direction.label_pt}):\n"
+                f"• {turns_text} volta(s) = {delta_text} mm\n"
+                f"• Runout lateral: "
+                f"{_fmt(result.lateral_runout_before_mm, 2)} → "
+                f"{_fmt(result.lateral_runout_mm, 2)} mm\n"
+                f"• Runout radial: "
+                f"{_fmt(result.radial_runout_before_mm, 2)} → "
+                f"{_fmt(result.radial_runout_mm, 2)} mm\n"
+                f"• Tensão no raio: {_fmt(tension_before, 0)} → "
+                f"{_fmt(tension_after, 0)} N\n"
+                f"• Tensões na roda: {_fmt(result.min_tension_n, 0)} a "
+                f"{_fmt(result.max_tension_n, 0)} N\n"
+                f"• Raios frouxos: {slack_text}\n"
+                f"• Iterações do equilíbrio: {result.iterations}\n\n"
+                "Use 'Sugerir ajustes' para o próximo passo."
+            )
+        except (ValueError, IndexError, TypeError) as exc:
+            self.info_text.setPlainText(f"Erro: {exc}")
+
+    def suggest_sim_adjustments(self) -> None:
+        try:
+            state = self._ensure_truing_state()
+            suggestion = state.suggest_adjustments(
+                max_turns=0.75,
+                min_turns=0.05,
+                lateral_weight=1.0,
+                radial_weight=0.5,
+                regularization=1e-4,
+            )
+            self.last_suggestion = suggestion
+            self.apply_suggestions_btn.setEnabled(bool(suggestion.adjustments))
+            self.info_text.setPlainText(self._format_suggestion(suggestion))
+        except (ValueError, TypeError) as exc:
+            self.last_suggestion = None
+            self.apply_suggestions_btn.setEnabled(False)
+            self.info_text.setPlainText(f"Erro: {exc}")
+
+    def apply_sim_suggestions(self) -> None:
+        try:
+            state = self._ensure_truing_state()
+            suggestion = self.last_suggestion
+            if suggestion is None or not suggestion.adjustments:
+                self.info_text.setPlainText(
+                    "Nenhuma sugestão pendente. Use 'Sugerir ajustes' "
+                    "primeiro."
+                )
+                return
+            turns_map = {
+                adjustment.index: adjustment.turns
+                for adjustment in suggestion.adjustments
+            }
+            result = state.apply_turns(turns_map)
+            self.last_suggestion = None
+            self.apply_suggestions_btn.setEnabled(False)
+            self._refresh_truing_view(state)
+            slack_text = (
+                "nenhum"
+                if not result.slack_indices
+                else ", ".join(str(value) for value in result.slack_indices)
+            )
+            self.info_text.setPlainText(
+                f"Sugestões aplicadas: {len(turns_map)} raio(s).\n"
+                f"• Runout lateral: "
+                f"{_fmt(result.lateral_runout_before_mm, 2)} → "
+                f"{_fmt(result.lateral_runout_mm, 2)} mm\n"
+                f"• Runout radial: "
+                f"{_fmt(result.radial_runout_before_mm, 2)} → "
+                f"{_fmt(result.radial_runout_mm, 2)} mm\n"
+                f"• Tensões na roda: {_fmt(result.min_tension_n, 0)} a "
+                f"{_fmt(result.max_tension_n, 0)} N\n"
+                f"• Raios frouxos: {slack_text}\n\n"
+                "Use 'Sugerir ajustes' novamente para o próximo passo."
             )
         except (ValueError, IndexError, TypeError) as exc:
             self.info_text.setPlainText(f"Erro: {exc}")

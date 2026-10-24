@@ -6,9 +6,10 @@ em *The Bicycle Wheel* (Jobst Brandt, 3ª ed.).
 O projeto começou como um protótipo de calculadora em PySide6. A Fase 0 separa
 a engenharia da interface, corrige os crashes do protótipo e cria uma base
 testável. A Fase 1 completa a calculadora, adiciona dish/centralização e gera
-uma ficha de montagem.
+uma ficha de montagem. A Fase 2 substitui o simulador didático por um solver
+elástico de alinhamento, com tensões, runout e sugestões de ajuste.
 
-## Estado atual (Fase 1)
+## Estado atual (Fase 2)
 
 - **Núcleo de cálculo puro em Python** (`wheel_lab/core/`), sem Qt e sem NumPy.
 - **Comprimento de raio** pela equação 1 de Brandt, por lado, com arredondamento
@@ -24,13 +25,21 @@ uma ficha de montagem.
 - **Visualizador** com vista superior, corte axial, filtros por lado/sentido e
   destaque do raio selecionado.
 - **Ficha de montagem** com resumo, JSON, Markdown e PDF.
-- **Simulador didático** de ajuste de niple, sem crashes ao trocar 32 → 36
-  raios. O solver físico do aro entra na Fase 2.
-- **Testes** de engenharia e smoke tests da UI em modo offscreen.
+- **Solver físico de truing** (`wheel_lab/core/truing.py`): aro como anel
+  elástico discretizado nos furos, com flexão lateral, flexão no plano e
+  membrana (hoop); raios como molas axiais só-tração, com rigidez geométrica.
+  Raios que ficam frouxos são desativados, a folga é rastreada e o equilíbrio é
+  resolvido novamente.
+- **Sugestões de ajuste** por mínimo quadrado regularizado, com passo global
+  limitado, arredondamento para 1/4 de volta e avisos de tensão/frouxidão.
+- **Testes** de engenharia, solver e smoke tests da UI em modo offscreen.
 
-O simulador atual **não** calcula equilíbrio elástico nem tensão. Ele move o
-raio selecionado e os vizinhos com fatores fixos; é apenas uma demonstração
-visual até a Fase 2.
+O modelo de truing é **incremental e linearizado**: parte da forma atual
+(runout medido ou exemplo) e calcula a mudança causada pelos ajustes. As
+sugestões são um passo; aplique, recalcule e repita, como no alinhamento real.
+As propriedades padrão do aro são rigidezes equivalentes de um aro de alumínio
+de perfil médio, não a geometria literal da seção. O solver exige número de
+raios múltiplo de 4, pois usa a tabela de montagem.
 
 ## Instalação
 
@@ -92,6 +101,7 @@ wheel_lab/
     lacing.py             # tabela de raios para desenho
     tension.py            # razão L/R, alvo, alongamento, tom, pneu
     build_sheet.py        # ficha, JSON, Markdown e HTML/PDF
+    truing.py             # solver elástico, runout, tensões e sugestões
     units.py              # TPI, voltas ↔ mm
 tests/
   test_spoke_length.py
@@ -100,6 +110,7 @@ tests/
   test_geometry.py
   test_tension.py
   test_lacing.py
+  test_truing.py
   test_units.py
   test_ui_smoke.py
 ```
@@ -133,13 +144,42 @@ T_esq / T_dir = (offset_dir / L_dir) / (offset_esq / L_esq)
 Compressão do aro (eq. 7), alongamento (eq. 3), tom de corda fixa e constrição
 do pneu (eq. 8) estão em `wheel_lab/core/tension.py`.
 
+## Modelo de alinhamento (Fase 2)
+
+O aro é discretizado nos furos dos raios, com dois graus de liberdade por nó:
+deslocamento radial e lateral. A energia inclui:
+
+- flexão lateral do aro;
+- flexão no plano (radial);
+- membrana/hoop, que resiste à variação local do perímetro;
+- molas axiais dos raios, com rigidez geométrica dependente da tensão.
+
+O ajuste do niple encurta o comprimento livre do raio em `s` (positivo ao
+apertar). O alongamento elástico é `n·δ + s`, onde `n` é a direção do raio e
+`δ` o deslocamento do aro. A tensão é limitada a zero: o solver usa um conjunto
+ativo, desativa raios frouxos, guarda a folga e resolve o equilíbrio de novo.
+A matriz de influência dá a resposta do aro a 1 mm de aperto em cada raio.
+
+As sugestões resolvem um mínimo quadrado regularizado com pesos para runout
+lateral e radial. O passo inteiro é reduzido para respeitar no máximo 3/4 de
+volta por raio e arredondado para 1/4 de volta. Como o modelo é linearizado,
+aplique um passo, recalcule e repita. Os padrões do aro são rigidezes
+equivalentes (`E = 69 GPa`, `I_lat = 7000 mm⁴`, `I_no_plano = 1500 mm⁴`,
+`A = 40 mm²`) e podem ser ajustados em `RimElasticProperties`.
+
+Limitações: o modelo usa apenas deslocamentos radial e lateral (sem grau de
+liberdade tangencial); não simula avarias, flambagem local, fadiga, rotação,
+pneu ou atrito do niple; a folga de um raio frouxo é tratada de forma
+unidimensional. Use-o como assistente de truing, não como substituto da
+inspeção e do tensiômetro.
+
 ## Roadmap
 
 - **Fase 0 (concluída)**: núcleo, validação, testes, correções de UI.
-- **Fase 1 (atual)**: calculadora completa, visualizador de montagem,
+- **Fase 1 (concluída)**: calculadora completa, visualizador de montagem,
   dish/centralização e build sheet em JSON/Markdown/PDF.
-- **Fase 2**: solver físico de truing (aro como viga/anel + raios como molas
-  só-tração), tensão, runout e sugestões de ajuste.
+- **Fase 2 (atual)**: solver físico de truing (aro como anel + raios como
+  molas só-tração), tensão, runout e sugestões de ajuste.
 - **Fase 3**: assistente dos 4 conjuntos de montagem, biblioteca de componentes
   e integração com o build sheet.
 - **Fase 4**: rigidez/FEM, leitura de tom por microfone e diagnóstico avançado.

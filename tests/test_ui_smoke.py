@@ -132,3 +132,67 @@ def test_locknut_spacing_is_optional(qt_app):
     assert window.last_sheet is not None
     assert window.last_sheet.spec.locknut_spacing_mm is None
     window.close()
+
+
+def test_example_and_physical_suggestions_reduce_runout(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    window.load_example()
+
+    state = window.truing_state
+    assert state is not None
+    before_lateral = state.lateral_runout_mm
+    before_radial = state.radial_runout_mm
+    assert before_lateral > 0.0
+    assert before_radial > 0.0
+    assert "tensão" in window.sim_selected_info.text()
+
+    window.suggest_sim_adjustments()
+    suggestion = window.last_suggestion
+    assert suggestion is not None
+    assert suggestion.adjustments
+    assert suggestion.predicted_lateral_runout_mm < before_lateral
+    assert suggestion.predicted_radial_runout_mm < before_radial
+    assert window.apply_suggestions_btn.isEnabled()
+    assert "SUGESTÕES DE AJUSTE" in window.info_text.toPlainText()
+
+    window.apply_sim_suggestions()
+    assert window.last_suggestion is None
+    assert not window.apply_suggestions_btn.isEnabled()
+    assert state.lateral_runout_mm < before_lateral
+    assert state.radial_runout_mm < before_radial
+    assert window.visualizer.lateral_offsets == list(state.lateral_mm)
+    assert "Sugestões aplicadas" in window.info_text.toPlainText()
+
+    window.suggest_sim_adjustments()
+    if window.last_suggestion is not None:
+        window.apply_sim_suggestions()
+    assert state.lateral_runout_mm < 0.4
+    assert state.radial_runout_mm < 0.1
+
+    window.visualizer.resize(420, 420)
+    window.visualizer.grab()
+    window.close()
+
+
+def test_reset_sim_clears_physical_state(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    window.load_example()
+    window.reset_sim()
+
+    assert window.truing_state is not None
+    assert window.truing_state.lateral_runout_mm == pytest.approx(0.0)
+    assert window.truing_state.radial_runout_mm == pytest.approx(0.0)
+    assert window.last_suggestion is None
+    assert not window.apply_suggestions_btn.isEnabled()
+    assert "resetado" in window.info_text.toPlainText()
+    window.close()
+
+
+def test_apply_suggestions_without_suggestion_is_safe(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    window.apply_sim_suggestions()
+    assert "Nenhuma sugestão" in window.info_text.toPlainText()
+    window.close()
