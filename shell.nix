@@ -11,6 +11,14 @@ let
     mesa
     dbus
     libxcb
+    libxcb-cursor
+    libxcb-image
+    libxcb-keysyms
+    libxcb-render-util
+    libxcb-util
+    libxcb-wm
+    libxcursor
+    wayland
     libx11
     libxext
     libxrender

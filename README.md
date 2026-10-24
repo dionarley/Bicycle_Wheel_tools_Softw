@@ -59,9 +59,10 @@ uv sync
 uv run wheel_builder_qt.py
 ```
 
-Em NixOS, o wheel do PySide6 não traz `libGL`, `libxkbcommon` e outras
-bibliotecas do sistema. O `shell.nix` fornece essas bibliotecas **e o próprio
-uv**; o `run.sh` detecta o Nix automaticamente. Se preferir rodar direto:
+Em NixOS, o wheel do PySide6 não traz `libGL`, `libxkbcommon`, `libxcb-cursor`
+e outras bibliotecas do sistema. O `shell.nix` fornece essas bibliotecas
+(incluindo os plugins xcb e Wayland) **e o próprio uv**; o `run.sh` detecta o
+Nix automaticamente. Se preferir rodar direto:
 
 ```bash
 nix-shell --run "uv run wheel_builder_qt.py"
