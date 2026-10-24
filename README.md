@@ -32,6 +32,8 @@ elástico de alinhamento, com tensões, runout e sugestões de ajuste.
   resolvido novamente.
 - **Sugestões de ajuste** por mínimo quadrado regularizado, com passo global
   limitado, arredondamento para 1/4 de volta e avisos de tensão/frouxidão.
+- **Instalação assistida** para NixOS, Arch, Debian/Ubuntu e RHEL/Fedora, com
+  detecção de distribuição e instalação das bibliotecas gráficas do Qt.
 - **Testes** de engenharia, solver e smoke tests da UI em modo offscreen.
 
 O modelo de truing é **incremental e linearizado**: parte da forma atual
@@ -43,26 +45,62 @@ raios múltiplo de 4, pois usa a tabela de montagem.
 
 ## Instalação
 
-Requisitos: Python 3.10+ e Linux/Windows/macOS com Qt. O projeto usa
-[uv](https://docs.astral.sh/uv/) para criar o ambiente e travar as versões
-(`uv.lock`); não é preciso criar `.venv` nem usar `pip` manualmente.
+Requisitos: Linux com Qt; Python 3.10+ é baixado/gerenciado pelo
+[uv](https://docs.astral.sh/uv/). O projeto usa `uv` para criar o ambiente e
+travar as versões (`uv.lock`); não é preciso criar `.venv` nem usar `pip`
+manualmente.
+
+### Instalação assistida
 
 ```bash
-./install.sh   # uv sync
+./install.sh   # dependências do sistema + uv sync
 ./run.sh       # uv run wheel_builder_qt.py
 ```
 
-Ou manualmente:
+O `install.sh` detecta o ambiente e instala as bibliotecas gráficas que o wheel
+do PySide6 não empacota:
+
+- **NixOS**: usa o `shell.nix` (uv, Qt, xcb e Wayland).
+- **Arch/Manjaro**: `pacman`.
+- **Debian/Ubuntu**: `apt-get`.
+- **RHEL/Fedora/Rocky/Alma**: `dnf` ou `yum`.
+
+Se o `uv` não estiver instalado, ele é instalado no diretório padrão do usuário
+(`~/.local/bin`). Depois o script executa `uv sync`.
+
+Opções úteis:
 
 ```bash
-uv sync
-uv run wheel_builder_qt.py
+./install.sh --dry-run          # mostra os comandos sem executar
+./install.sh --no-system        # não instala dependências do sistema
+./install.sh --no-uv            # não instala o uv automaticamente
+./install.sh --distro arch      # força arch, debian ou rhel
+WHEEL_LAB_USE_NIX=1 ./install.sh  # força o Nix em qualquer distribuição
+WHEEL_LAB_USE_NIX=0 ./install.sh  # ignora o Nix, inclusive no NixOS
 ```
 
-Em NixOS, o wheel do PySide6 não traz `libGL`, `libxkbcommon`, `libxcb-cursor`
-e outras bibliotecas do sistema. O `shell.nix` fornece essas bibliotecas
-(incluindo os plugins xcb e Wayland) **e o próprio uv**; o `run.sh` detecta o
-Nix automaticamente. Se preferir rodar direto:
+Para instalar apenas as bibliotecas do sistema:
+
+```bash
+./install_system_deps.sh
+./install_system_deps.sh --dry-run --distro debian
+```
+
+Em RHEL 9, o pacote `xcb-util-cursor` pode estar no EPEL. Se o script avisar que
+ele não foi encontrado:
+
+```bash
+sudo dnf install epel-release
+sudo dnf install xcb-util-cursor
+```
+
+### NixOS
+
+O wheel do PySide6 não traz `libGL`, `libxkbcommon`, `libxcb-cursor` e outras
+bibliotecas do sistema. O `shell.nix` fornece essas bibliotecas (incluindo os
+plugins xcb e Wayland) **e o próprio uv**. O `run.sh` usa o Nix automaticamente
+no NixOS; nas demais distribuições, usa o `uv` do ambiente criado por
+`./install.sh`. Para rodar direto:
 
 ```bash
 nix-shell --run "uv run wheel_builder_qt.py"
@@ -91,7 +129,9 @@ Os testes da UI usam `QT_QPA_PLATFORM=offscreen` (definido em
 wheel_builder_qt.py       # janela PySide6 (entry point)
 pyproject.toml            # dependências e configuração do projeto
 uv.lock                   # versões travadas pelo uv
-run.sh                    # executa a UI (com Nix quando disponível)
+install.sh                # detecta NixOS/distribuição e prepara o uv
+install_system_deps.sh    # libs Qt via pacman/apt/dnf
+run.sh                    # executa a UI (Nix no NixOS, uv nas demais)
 shell.nix                 # uv + bibliotecas gráficas para NixOS
 wheel_lab/
   __init__.py
