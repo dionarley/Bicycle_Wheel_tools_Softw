@@ -9,9 +9,11 @@ testável. A Fase 1 completa a calculadora, adiciona dish/centralização e gera
 uma ficha de montagem. A Fase 2 substitui o simulador didático por um solver
 elástico de alinhamento, com tensões, runout e sugestões de ajuste. A Fase 3
 adiciona a biblioteca de componentes e o assistente dos quatro conjuntos de
-montagem, integrados à ficha.
+montagem, integrados à ficha. A Fase 4 acrescenta estimativas de rigidez,
+leitura de tom a partir de gravações WAV e diagnóstico avançado integrado à
+ficha.
 
-## Estado atual (Fase 3)
+## Estado atual (Fase 4)
 
 - **Núcleo de cálculo puro em Python** (`wheel_lab/core/`), sem Qt e sem NumPy.
 - **Comprimento de raio** pela equação 1 de Brandt, por lado, com arredondamento
@@ -27,7 +29,7 @@ montagem, integrados à ficha.
 - **Visualizador** com vista superior, corte axial, filtros por lado/sentido,
   destaque do raio selecionado e destaque do conjunto atual do assistente.
 - **Ficha de montagem** com resumo, JSON, Markdown e PDF, incluindo os
-  componentes selecionados e o plano dos quatro conjuntos.
+  componentes selecionados, o plano dos quatro conjuntos e o diagnóstico.
 - **Biblioteca de componentes** (`wheel_lab/core/components.py`): presets de
   aros, cubos, raios e niples, com validação de furação e medidas. A seleção
   preenche o cálculo e fica registrada na ficha.
@@ -41,6 +43,14 @@ montagem, integrados à ficha.
   resolvido novamente.
 - **Sugestões de ajuste** por mínimo quadrado regularizado, com passo global
   limitado, arredondamento para 1/4 de volta e avisos de tensão/frouxidão.
+- **Rigidez da roda** (`wheel_lab/core/stiffness.py`): rigidez de ponto lateral
+  e radial pelo mesmo modelo de anel + raios e rigidez torsional analítica.
+- **Leitura de tom** (`wheel_lab/core/audio.py`): importa WAV PCM de 8, 16, 24
+  ou 32 bits, estima a frequência por FFT em Python puro e converte para tensão
+  quando o lado, o comprimento e a densidade do raio são conhecidos.
+- **Diagnóstico avançado** (`wheel_lab/core/diagnostics.py`): achados
+  priorizados sobre centralização, tensão, alinhamento, componentes, montagem,
+  tom e rigidez, com pontuação e exportação em texto/Markdown/HTML/JSON.
 - **Instalação assistida** para NixOS, Arch, Debian/Ubuntu e RHEL/Fedora, com
   detecção de distribuição e instalação das bibliotecas gráficas do Qt.
 - **Testes** de engenharia, solver e smoke tests da UI em modo offscreen.
@@ -52,6 +62,12 @@ As propriedades padrão do aro são rigidezes equivalentes de um aro de alumíni
 de perfil médio, não a geometria literal da seção. O solver exige número de
 raios múltiplo de 4, pois usa a tabela de montagem. O assistente também exige
 múltiplo de 4, para que os quatro conjuntos tenham o mesmo número de raios.
+
+A leitura de tom é feita a partir de um arquivo WAV (por exemplo, gravado com o
+celular); não há captura ao vivo nesta fase. A rigidez lateral/radial é de
+**ponto** e a torsional é uma estimativa analítica separada, pois o solver de
+truing não tem grau de liberdade tangencial. Nenhum desses resultados substitui
+um ensaio de rigidez, um tensiômetro ou a inspeção visual.
 
 ## Instalação
 
@@ -155,6 +171,9 @@ wheel_lab/
     assembly.py           # assistente dos 4 conjuntos e plano de montagem
     build_sheet.py        # ficha, JSON, Markdown e HTML/PDF
     truing.py             # solver elástico, runout, tensões e sugestões
+    stiffness.py          # rigidez lateral, radial e torsional
+    audio.py              # leitura de WAV e estimativa de tom
+    diagnostics.py        # diagnóstico priorizado e pontuação
     units.py              # TPI, voltas ↔ mm
 tests/
   test_spoke_length.py
@@ -162,6 +181,9 @@ tests/
   test_build_sheet.py
   test_components.py
   test_assembly.py
+  test_audio.py
+  test_diagnostics.py
+  test_stiffness.py
   test_geometry.py
   test_tension.py
   test_lacing.py
@@ -263,6 +285,78 @@ pneu ou atrito do niple; a folga de um raio frouxo é tratada de forma
 unidimensional. Use-o como assistente de truing, não como substituto da
 inspeção e do tensiômetro.
 
+## Rigidez (Fase 4)
+
+A rigidez lateral e a radial vêm do mesmo modelo de anel + raios do solver de
+alinhamento. Para cada furo do aro, o módulo aplica 1 N na direção radial ou
+lateral, resolve o equilíbrio e mede o deslocamento no próprio nó. A rigidez de
+ponto é `1 / deslocamento`; a média, o mínimo e o máximo aparecem na aba
+**Diagnóstico e rigidez** e no relatório. Apenas os raios ativos contribuem.
+
+A rigidez torsional é uma estimativa analítica separada, porque o solver tem
+somente graus de liberdade radial e lateral. Para uma pequena rotação relativa
+cubo↔aro, a componente tangencial de cada raio é `a = r_f·sin(T)` e o braço de
+momento é `r_f·a/L`. A rigidez aproximada é:
+
+```text
+k_torsional ≈ Σ k_raio · (r_f · a / L)²   [N·mm/rad]
+```
+
+O resultado é convertido para N·m/°. Em montagem radial (`T = 0`), a componente
+tangencial é nula e a estimativa torsional também. Os valores são de ordem de
+grandeza e dependem das rigidezes equivalentes do aro; use-os para comparar a
+mesma roda com diferentes tensões ou padrões, não como valor absoluto de
+catálogo. Limitações: não há grau de liberdade tangencial, contato do pneu,
+flexão local do flange ou ensaio de torção; a rigidez de ponto varia ao longo
+do aro.
+
+## Leitura de tom (Fase 4)
+
+Grave o som de um raio com o microfone ou o celular e importe o WAV na aba
+**Leitura de tom**. O módulo aceita PCM de 8, 16, 24 ou 32 bits, mono ou
+estéreo, e limita a leitura aos primeiros 5 s. O sinal é centralizado, janelado
+com Hann, decimado para ~8 kHz e analisado por uma FFT radix-2 implementada em
+Python puro. A frequência é refinada por interpolação parabólica e a confiança
+vem da concentração de energia espectral: um tom limpo concentra a energia em
+poucos bins; ruído a espalha pela banda.
+
+Para converter a frequência em tensão, selecione o lado do raio. O programa usa
+o comprimento do raio calculado, a densidade linear do aço e a equação da corda
+fixa:
+
+```text
+f = (1 / 2L) · sqrt(T / μ)
+```
+
+A tensão estimada é comparada com a tensão esperada do lado. Avisos aparecem
+para confiança baixa, sinal fraco, gravação curta ou pico próximo do limite da
+faixa. Limitações: ruído ambiente, harmônicos, distância do microfone, apoio do
+raio e condições de contorno alteram a frequência. O tom serve para comparar
+raios e acompanhar a montagem; a tensão absoluta deve ser confirmada com
+tensiômetro.
+
+## Diagnóstico avançado (Fase 4)
+
+O diagnóstico transforma as verificações em achados com gravidade `info`,
+`aviso` ou `crítico`, categoria, mensagem, valor e ação recomendada. Ele cobre:
+
+- centralização (dish) e distância entre locknuts;
+- ângulo de cruzamento no limite de 90°;
+- compatibilidade dos componentes e disponibilidade do assistente;
+- razão de tensão entre os lados;
+- runout lateral/radial, raios frouxos e tensões fora da faixa quando o estado
+  físico está disponível;
+- desvio entre a tensão lida pelo tom e a esperada;
+- rigidez lateral/radial/torsional e seus avisos.
+
+A pontuação (0–100) é heurística: cada achado crítico desconta 30 pontos e cada
+aviso 10; informações não descontam. O relatório sai em texto, Markdown, HTML e
+JSON.
+`create_build_sheet()` já gera um diagnóstico básico; a aba **Diagnóstico e
+rigidez** pode enriquecê-lo com o estado físico, a leitura de tom e a rigidez e
+atualizar a ficha. O diagnóstico é um roteiro de conferência, não um laudo
+mecânico.
+
 ## Roadmap
 
 - **Fase 0 (concluída)**: núcleo, validação, testes, correções de UI.
@@ -272,8 +366,10 @@ inspeção e do tensiômetro.
   molas só-tração), tensão, runout e sugestões de ajuste.
 - **Fase 3 (concluída)**: assistente dos 4 conjuntos de montagem, biblioteca de
   componentes e integração com o build sheet.
-- **Fase 4 (próxima)**: rigidez/FEM, leitura de tom por microfone e diagnóstico
-  avançado.
+- **Fase 4 (concluída)**: rigidez lateral/radial/torsional, leitura de tom por
+  WAV e diagnóstico avançado integrado à ficha.
+- **Fase 5 (próxima)**: validação com rodas reais, calibração dos modelos de
+  rigidez/tom e captura de áudio ao vivo.
 
 ## Referência e direitos autorais
 

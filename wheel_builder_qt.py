@@ -1,15 +1,17 @@
 #!/usr/bin/env python3
 """Wheel Lab — calculador e alinhador de rodas de bicicleta.
 
-Fase 1: calculadora completa, visualizador de montagem, dish/centralização e
-ficha de montagem (JSON, Markdown e PDF). Fase 2: solver elástico de truing
-(aro + raios só-tração), tensões, runout e sugestões de ajuste.
+Fases 1–2: calculadora, visualizador, dish/centralização, ficha de montagem e
+solver elástico de truing. Fase 3: biblioteca de componentes e assistente dos
+quatro conjuntos. Fase 4: rigidez, leitura de tom por WAV e diagnóstico
+avançado.
 """
 
 from __future__ import annotations
 
 import math
 import sys
+from dataclasses import replace
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import (
@@ -52,16 +54,23 @@ from wheel_lab.core import (
     AssemblyPlan,
     BuildSheet,
     ComponentSet,
+    DiagnosticReport,
     Side,
     SpokeDirection,
+    ToneReading,
     TruingState,
     TruingSuggestion,
     WheelSpec,
+    WheelStiffness,
+    analyze_wav_file,
     build_spoke_table,
     create_build_sheet,
     default_component_library,
+    diagnose_build_sheet,
     erd_from_outer_diameter,
+    estimate_wheel_stiffness,
     is_valid_cross_pattern,
+    linear_density_kg_per_m,
     max_crossings,
     turns_to_mm,
 )
@@ -768,6 +777,9 @@ class WheelCalculatorApp(QMainWindow):
         self.last_sheet: BuildSheet | None = None
         self.truing_state: TruingState | None = None
         self.last_suggestion: TruingSuggestion | None = None
+        self.last_tone_reading: ToneReading | None = None
+        self.last_stiffness: WheelStiffness | None = None
+        self.last_diagnostics: DiagnosticReport | None = None
 
         self.component_library = default_component_library()
         self.current_components: ComponentSet | None = None
@@ -793,6 +805,8 @@ class WheelCalculatorApp(QMainWindow):
         self.init_calculator_tab()
         self.init_truing_sim_tab()
         self.init_assembly_tab()
+        self.init_audio_tab()
+        self.init_diagnostics_tab()
         self.init_build_sheet_tab()
         splitter.addWidget(self.tabs)
 
@@ -1139,6 +1153,122 @@ class WheelCalculatorApp(QMainWindow):
                 self._on_component_selection_changed
             )
         self._update_component_summary()
+
+    def init_audio_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        file_group = QGroupBox("Gravação do tom")
+        file_layout = QVBoxLayout(file_group)
+
+        file_row = QHBoxLayout()
+        self.audio_path_input = QLineEdit()
+        self.audio_path_input.setPlaceholderText(
+            "Escolha um arquivo WAV gravado com o microfone..."
+        )
+        browse_btn = QPushButton("Escolher WAV...")
+        browse_btn.clicked.connect(self.browse_audio_file)
+        file_row.addWidget(self.audio_path_input, 1)
+        file_row.addWidget(browse_btn)
+        file_layout.addLayout(file_row)
+
+        form = QFormLayout()
+        self.audio_side_combo = QComboBox()
+        self.audio_side_combo.addItem("Não informado (só frequência)", None)
+        self.audio_side_combo.addItem("Esquerdo", Side.LEFT)
+        self.audio_side_combo.addItem("Direito", Side.RIGHT)
+        self.audio_side_combo.currentIndexChanged.connect(
+            self._update_audio_hint
+        )
+        form.addRow("Lado do raio:", self.audio_side_combo)
+        file_layout.addLayout(form)
+
+        self.audio_hint = QLabel(
+            "Calcule os raios e escolha o lado para estimar a tensão."
+        )
+        self.audio_hint.setWordWrap(True)
+        self.audio_hint.setStyleSheet("color: #555;")
+        file_layout.addWidget(self.audio_hint)
+
+        analyze_btn = QPushButton("Analisar gravação")
+        analyze_btn.clicked.connect(self.analyze_audio)
+        file_layout.addWidget(analyze_btn)
+        layout.addWidget(file_group)
+
+        self.audio_result_text = QTextEdit()
+        self.audio_result_text.setReadOnly(True)
+        self.audio_result_text.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.audio_result_text.setPlainText(
+            "A leitura de tom aparecerá aqui. Use um WAV PCM de 8, 16, 24 "
+            "ou 32 bits."
+        )
+        layout.addWidget(self.audio_result_text, 1)
+
+        note = QLabel(
+            "A frequência é estimada por FFT em Python puro. A conversão para "
+            "tensão usa a equação da corda e depende do comprimento livre e da "
+            "densidade linear do raio; o resultado é uma estimativa, não "
+            "substitui o tensiômetro. O lado selecionado define o comprimento "
+            "e a tensão esperada."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        self.tabs.addTab(tab, "Leitura de tom")
+
+    def init_diagnostics_tab(self) -> None:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        stiffness_group = QGroupBox("Rigidez da roda (anel + raios)")
+        stiffness_layout = QVBoxLayout(stiffness_group)
+        self.stiffness_text = QTextEdit()
+        self.stiffness_text.setReadOnly(True)
+        self.stiffness_text.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.stiffness_text.setPlainText(
+            "Calcule a rigidez para estimar os valores lateral, radial e "
+            "torsional."
+        )
+        stiffness_layout.addWidget(self.stiffness_text, 1)
+        stiffness_btn = QPushButton("Calcular rigidez")
+        stiffness_btn.clicked.connect(self.calculate_stiffness)
+        stiffness_layout.addWidget(stiffness_btn)
+        layout.addWidget(stiffness_group, 1)
+
+        diagnostics_group = QGroupBox("Diagnóstico avançado")
+        diagnostics_layout = QVBoxLayout(diagnostics_group)
+        self.diagnostics_text = QTextEdit()
+        self.diagnostics_text.setReadOnly(True)
+        self.diagnostics_text.setFont(
+            QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
+        )
+        self.diagnostics_text.setPlainText(
+            "O diagnóstico reúne centralização, tensão, alinhamento, "
+            "componentes, tom e rigidez em uma lista priorizada."
+        )
+        diagnostics_layout.addWidget(self.diagnostics_text, 1)
+        diagnostics_btn = QPushButton(
+            "Gerar diagnóstico e atualizar ficha"
+        )
+        diagnostics_btn.clicked.connect(self.generate_diagnostics)
+        diagnostics_layout.addWidget(diagnostics_btn)
+        layout.addWidget(diagnostics_group, 1)
+
+        note = QLabel(
+            "O diagnóstico automático não substitui a inspeção visual. "
+            "Calcule a rigidez e analise o tom antes de gerar o diagnóstico "
+            "para incluí-los; a ficha é atualizada com o relatório gerado."
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #555;")
+        layout.addWidget(note)
+
+        self.tabs.addTab(tab, "Diagnóstico e rigidez")
 
     def init_build_sheet_tab(self) -> None:
         tab = QWidget()
@@ -1506,6 +1636,128 @@ class WheelCalculatorApp(QMainWindow):
                 "Plano dos 4 conjuntos gerado.", 5000
             )
 
+    def _update_audio_hint(self, *args) -> None:
+        if not hasattr(self, "audio_hint"):
+            return
+        raw_side = self.audio_side_combo.currentData()
+        side = Side(raw_side) if raw_side is not None else None
+        sheet = self.last_sheet
+        if sheet is None:
+            self.audio_hint.setText(
+                "Calcule os raios e escolha o lado para estimar a tensão."
+            )
+            return
+        if side is None:
+            self.audio_hint.setText(
+                "Sem lado selecionado: a análise mostra apenas a frequência. "
+                "Escolha o lado para converter o tom em tensão."
+            )
+            return
+        if side is Side.LEFT:
+            length = sheet.result.left_mm
+        else:
+            length = sheet.result.right_mm
+        expected = sheet.tensions_n[side]
+        self.audio_hint.setText(
+            f"Esperado: {_fmt(expected, 0)} N; comprimento do raio: "
+            f"{_fmt(length, 2)} mm."
+        )
+
+    def browse_audio_file(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Abrir gravação de tom",
+            "",
+            "Arquivos WAV (*.wav *.WAV);;Todos os arquivos (*)",
+        )
+        if path:
+            self.audio_path_input.setText(path)
+
+    def analyze_audio(self) -> None:
+        path = self.audio_path_input.text().strip()
+        if not path:
+            QMessageBox.warning(
+                self,
+                "Leitura de tom",
+                "Escolha um arquivo WAV gravado com o microfone.",
+            )
+            return
+        sheet = self._ensure_sheet()
+        if sheet is None:
+            return
+        raw_side = self.audio_side_combo.currentData()
+        side = Side(raw_side) if raw_side is not None else None
+        spoke_length = None
+        expected = None
+        density = None
+        if side is Side.LEFT:
+            spoke_length = sheet.result.left_mm
+            expected = sheet.tensions_n[Side.LEFT]
+            density = linear_density_kg_per_m(sheet.spoke_diameter_mm)
+        elif side is Side.RIGHT:
+            spoke_length = sheet.result.right_mm
+            expected = sheet.tensions_n[Side.RIGHT]
+            density = linear_density_kg_per_m(sheet.spoke_diameter_mm)
+        try:
+            reading = analyze_wav_file(
+                path,
+                side=side,
+                expected_tension_n=expected,
+                spoke_length_mm=spoke_length,
+                linear_density_kg_per_m_value=density,
+            )
+        except (ValueError, OSError) as exc:
+            QMessageBox.warning(self, "Leitura de tom", str(exc))
+            return
+        self.last_tone_reading = reading
+        self.audio_result_text.setPlainText(reading.summary_text())
+        self.statusBar().showMessage(
+            f"Tom lido: {_fmt(reading.frequency_hz, 1)} Hz.", 5000
+        )
+
+    def calculate_stiffness(self) -> None:
+        try:
+            sheet = self._ensure_sheet()
+            if sheet is None:
+                return
+            stiffness = estimate_wheel_stiffness(
+                sheet.spec,
+                sheet.target_tension_n,
+                sheet.spoke_diameter_mm,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rigidez da roda", str(exc))
+            return
+        self.last_stiffness = stiffness
+        self.stiffness_text.setPlainText(stiffness.summary_text())
+        self.statusBar().showMessage(
+            "Rigidez estimada para a montagem atual.", 5000
+        )
+
+    def generate_diagnostics(self) -> None:
+        try:
+            sheet = self._ensure_sheet()
+            if sheet is None:
+                return
+            try:
+                state = self._ensure_truing_state()
+            except ValueError:
+                state = None
+            report = diagnose_build_sheet(
+                sheet,
+                truing_state=state,
+                tone_readings=self.last_tone_reading,
+                stiffness=self.last_stiffness,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Diagnóstico", str(exc))
+            return
+        self.last_diagnostics = report
+        self.last_sheet = replace(sheet, diagnostics=report)
+        self.diagnostics_text.setPlainText(report.to_text())
+        self.sheet_preview.setMarkdown(self.last_sheet.to_markdown())
+        self.statusBar().showMessage(report.summary_text(), 8000)
+
     def _selected_sim_index(self) -> int | None:
         try:
             index = int(self.sim_spoke_idx.text().strip())
@@ -1680,6 +1932,30 @@ class WheelCalculatorApp(QMainWindow):
 
     def _ensure_sheet(self) -> BuildSheet | None:
         if self.last_sheet is None:
+            self.calculate_spokes()
+            return self.last_sheet
+
+        try:
+            spec = self._read_spec()
+            target = self._parse_float(
+                self.target_tension_input, "Tensão alvo"
+            )
+            diameter = self._parse_float(
+                self.spoke_diameter_input, "Diâmetro do raio"
+            )
+        except ValueError:
+            # Os campos atuais não formam uma montagem válida; o cálculo
+            # registra a mensagem de erro e zera a ficha.
+            self.calculate_spokes()
+            return self.last_sheet
+
+        sheet = self.last_sheet
+        if (
+            sheet.spec != spec
+            or abs(sheet.target_tension_n - target) > 1e-9
+            or abs(sheet.spoke_diameter_mm - diameter) > 1e-9
+            or sheet.components is not self.current_components
+        ):
             self.calculate_spokes()
         return self.last_sheet
 
@@ -1888,6 +2164,26 @@ class WheelCalculatorApp(QMainWindow):
             self.visualizer.set_selected_index(self._selected_sim_index())
             self.centering_view.set_spec(spec)
             self.last_sheet = sheet
+            self.last_diagnostics = sheet.diagnostics
+            self.last_stiffness = None
+            self.last_tone_reading = None
+            if hasattr(self, "audio_result_text"):
+                self.audio_result_text.setPlainText(
+                    "A leitura de tom aparecerá aqui. Use um WAV PCM de 8, "
+                    "16, 24 ou 32 bits."
+                )
+            if hasattr(self, "stiffness_text"):
+                self.stiffness_text.setPlainText(
+                    "Calcule a rigidez para estimar os valores lateral, "
+                    "radial e torsional."
+                )
+            if hasattr(self, "diagnostics_text"):
+                self.diagnostics_text.setPlainText(
+                    sheet.diagnostics.to_text()
+                    if sheet.diagnostics is not None
+                    else "Diagnóstico indisponível."
+                )
+            self._update_audio_hint()
             reset_plan = (
                 sheet.assembly_plan is None
                 or self.assembly_plan != sheet.assembly_plan
@@ -1915,10 +2211,22 @@ class WheelCalculatorApp(QMainWindow):
             self.statusBar().showMessage("Cálculo concluído.", 5000)
         except ValueError as exc:
             self.last_sheet = None
+            self.last_diagnostics = None
+            self.last_stiffness = None
+            self.last_tone_reading = None
             self.truing_state = None
             self.last_suggestion = None
             if hasattr(self, "apply_suggestions_btn"):
                 self.apply_suggestions_btn.setEnabled(False)
+            if hasattr(self, "diagnostics_text"):
+                self.diagnostics_text.setPlainText(
+                    "Corrija os dados e calcule os raios para gerar o "
+                    "diagnóstico."
+                )
+            if hasattr(self, "stiffness_text"):
+                self.stiffness_text.setPlainText(
+                    "Calcule a rigidez depois de corrigir os dados."
+                )
             self._on_sim_index_changed()
             self.info_text.setPlainText(f"Erro: {exc}")
             self.sheet_preview.setPlainText(

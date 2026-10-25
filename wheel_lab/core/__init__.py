@@ -6,7 +6,19 @@ sem abrir uma janela.
 """
 
 from .assembly import AssemblyGroup, AssemblyPlan, build_assembly_plan
+from .audio import (
+    ToneReading,
+    analyze_wav_file,
+    estimate_tone,
+    read_wav_mono,
+)
 from .build_sheet import BuildSheet, create_build_sheet
+from .diagnostics import (
+    DiagnosticFinding,
+    DiagnosticReport,
+    Severity,
+    diagnose_build_sheet,
+)
 from .components import (
     ComponentLibrary,
     ComponentSet,
@@ -30,6 +42,7 @@ from .models import (
     SpokeLengthResult,
     WheelSpec,
 )
+from .stiffness import WheelStiffness, estimate_wheel_stiffness
 from .spoke_length import (
     calculate_spoke_lengths,
     purchase_length_mm,
@@ -80,10 +93,13 @@ __all__ = [
     "BuildSheet",
     "ComponentLibrary",
     "ComponentSet",
+    "DiagnosticFinding",
+    "DiagnosticReport",
     "HubComponent",
     "NippleComponent",
     "RimComponent",
     "RimElasticProperties",
+    "Severity",
     "Side",
     "SpokeComponent",
     "SpokeGeometry",
@@ -94,14 +110,20 @@ __all__ = [
     "TruingResult",
     "TruingState",
     "TruingSuggestion",
+    "ToneReading",
     "WheelSpec",
+    "WheelStiffness",
     "build_assembly_plan",
+    "analyze_wav_file",
     "build_spoke_geometries",
     "build_spoke_table",
     "calculate_spoke_lengths",
     "create_build_sheet",
     "default_component_library",
+    "diagnose_build_sheet",
     "erd_from_outer_diameter",
+    "estimate_tone",
+    "estimate_wheel_stiffness",
     "inch_to_mm",
     "is_valid_cross_pattern",
     "lateral_tension_ratio",
@@ -110,6 +132,7 @@ __all__ = [
     "mm_to_inch",
     "mm_to_turns",
     "purchase_length_mm",
+    "read_wav_mono",
     "rim_compression_from_sides",
     "rim_compression_n",
     "spoke_angle_deg",

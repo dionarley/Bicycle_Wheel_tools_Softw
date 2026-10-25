@@ -1,3 +1,7 @@
+import math
+import wave
+from array import array
+
 import pytest
 
 pytest.importorskip("PySide6")
@@ -8,6 +12,22 @@ try:
     import wheel_builder_qt as appmod  # noqa: E402
 except ImportError as exc:  # ex.: libGL/libxkbcommon ausentes no sistema
     pytest.skip(f"Interface PySide6 indisponível: {exc}", allow_module_level=True)
+
+
+def write_tone_wav(path, frequency_hz, rate=8000, seconds=0.5):
+    count = int(rate * seconds)
+    frames = array(
+        "h",
+        [
+            int(0.4 * 32767 * math.sin(2.0 * math.pi * frequency_hz * i / rate))
+            for i in range(count)
+        ],
+    )
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(frames.tobytes())
 
 
 @pytest.fixture(scope="module")
@@ -283,4 +303,87 @@ def test_assembly_actions_without_plan_are_safe(qt_app):
     window._show_assembly_group(0)
     assert "Selecione um conjunto" in window.assembly_text.toPlainText()
     assert "Gere o plano primeiro" in window.statusBar().currentMessage()
+    window.close()
+
+
+def test_audio_and_diagnostics_tabs_work(qt_app, tmp_path):
+    window = appmod.WheelCalculatorApp()
+    tab_names = [
+        window.tabs.tabText(index) for index in range(window.tabs.count())
+    ]
+    assert "Leitura de tom" in tab_names
+    assert "Diagnóstico e rigidez" in tab_names
+
+    window.calculate_spokes()
+    sheet = window.last_sheet
+    assert sheet is not None
+    assert sheet.diagnostics is not None
+
+    window.audio_side_combo.setCurrentIndex(2)
+    assert window.audio_hint.text().startswith("Esperado:")
+    path = tmp_path / "tom.wav"
+    write_tone_wav(path, sheet.tone_right_hz)
+    window.audio_path_input.setText(str(path))
+    window.analyze_audio()
+
+    reading = window.last_tone_reading
+    assert reading is not None
+    assert reading.side is appmod.Side.RIGHT
+    assert reading.frequency_hz == pytest.approx(sheet.tone_right_hz, abs=2.0)
+    assert "LEITURA DE TOM" in window.audio_result_text.toPlainText()
+
+    window.calculate_stiffness()
+    assert window.last_stiffness is not None
+    assert "RIGIDEZ DA RODA" in window.stiffness_text.toPlainText()
+
+    window.generate_diagnostics()
+    assert window.last_diagnostics is not None
+    assert "DIAGNÓSTICO DA RODA" in window.diagnostics_text.toPlainText()
+    assert "Diagnóstico da roda" in window.sheet_preview.toPlainText()
+    assert window.last_sheet is not None
+    assert window.last_sheet.diagnostics is window.last_diagnostics
+    window.close()
+
+
+def test_audio_without_side_only_reads_frequency(qt_app, tmp_path):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    path = tmp_path / "tom.wav"
+    write_tone_wav(path, 440.0)
+    window.audio_path_input.setText(str(path))
+    window.audio_side_combo.setCurrentIndex(0)
+    window.analyze_audio()
+
+    reading = window.last_tone_reading
+    assert reading is not None
+    assert reading.side is None
+    assert reading.tension_n is None
+    assert "Tensão estimada" not in reading.summary_text()
+    window.close()
+
+
+def test_diagnostics_without_physical_state(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.spokes_count_combo.addItem("30")
+    window.spokes_count_combo.setCurrentText("30")
+    window.calculate_spokes()
+    assert window.last_sheet is not None
+    assert window.truing_state is None
+
+    window.generate_diagnostics()
+    assert window.last_diagnostics is not None
+    assert "múltiplo de 4" in window.diagnostics_text.toPlainText()
+    window.close()
+
+def test_ensure_sheet_recalculates_after_field_change(qt_app):
+    window = appmod.WheelCalculatorApp()
+    window.calculate_spokes()
+    old_sheet = window.last_sheet
+    assert old_sheet is not None
+
+    window.erd_input.setText("610.0")
+    sheet = window._ensure_sheet()
+    assert sheet is not None
+    assert sheet is not old_sheet
+    assert sheet.spec.erd_mm == 610.0
     window.close()

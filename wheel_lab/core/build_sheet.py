@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
 
 from .assembly import AssemblyPlan, build_assembly_plan
 from .components import ComponentSet
+from .diagnostics import DiagnosticReport, diagnose_build_sheet
 from .models import Side, SpokeLengthResult, WheelSpec
 from .spoke_length import calculate_spoke_lengths
 from .tension import (
@@ -57,6 +58,7 @@ class BuildSheet:
     notes: str = ""
     components: ComponentSet | None = None
     assembly_plan: AssemblyPlan | None = None
+    diagnostics: DiagnosticReport | None = None
 
     @property
     def tighter_side(self) -> Side:
@@ -185,6 +187,8 @@ class BuildSheet:
                     "Veja a aba 'Assistente de montagem' ou a ficha completa.",
                 ]
             )
+        if self.diagnostics is not None:
+            lines.extend(["", self.diagnostics.summary_text()])
         warnings = self.warnings()
         if warnings:
             lines.extend(["", "Avisos:"])
@@ -266,6 +270,11 @@ class BuildSheet:
             "assembly": (
                 self.assembly_plan.to_dict()
                 if self.assembly_plan is not None
+                else None
+            ),
+            "diagnostics": (
+                self.diagnostics.to_dict()
+                if self.diagnostics is not None
                 else None
             ),
         }
@@ -382,6 +391,12 @@ class BuildSheet:
                 + [""]
             )
             lines[insert_at:insert_at] = assembly_lines
+        if self.diagnostics is not None:
+            insert_at = lines.index("## Avisos")
+            diagnostic_lines = (
+                self.diagnostics.to_markdown().splitlines() + [""]
+            )
+            lines[insert_at:insert_at] = diagnostic_lines
         return "\n".join(lines)
 
     def to_html(self) -> str:
@@ -409,6 +424,11 @@ class BuildSheet:
             if self.assembly_plan is not None
             else ""
         )
+        diagnostics_html = (
+            self.diagnostics.to_html()
+            if self.diagnostics is not None
+            else ""
+        )
         return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -422,6 +442,9 @@ class BuildSheet:
   th {{ background: #eee; }}
   .ok {{ color: #1a7f37; }}
   .warn {{ color: #b42318; }}
+  .critical {{ color: #b42318; font-weight: bold; }}
+  .warning {{ color: #b54708; }}
+  .info {{ color: #175cd3; }}
   .muted {{ color: #666; }}
 </style>
 </head>
@@ -466,6 +489,8 @@ class BuildSheet:
 </table>
 
 {assembly_html}
+
+{diagnostics_html}
 
 <h2>Avisos</h2>
 {warning_html}
@@ -521,7 +546,7 @@ def create_build_sheet(
     )
     mu = linear_density_kg_per_m(spoke_diameter_mm)
 
-    return BuildSheet(
+    sheet = BuildSheet(
         spec=spec,
         result=result,
         target_tension_n=target_tension_n,
@@ -546,6 +571,7 @@ def create_build_sheet(
         components=components,
         assembly_plan=_safe_assembly_plan(spec),
     )
+    return replace(sheet, diagnostics=diagnose_build_sheet(sheet))
 
 
 def _safe_assembly_plan(spec: WheelSpec) -> AssemblyPlan | None:

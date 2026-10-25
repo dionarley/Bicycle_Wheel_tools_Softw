@@ -373,6 +373,49 @@ class TruingState:
             columns.append(tuple(_cholesky_solve(factor, load)))
         return tuple(columns)
 
+    def stiffness_matrix(self) -> tuple[tuple[float, ...], ...]:
+        """Matriz de rigidez tangente do aro com os raios ativos.
+
+        A ordem dos graus de liberdade é ``[radial, lateral]`` por nó. A
+        matriz é montada no estado atual de tensões e pode ser usada para
+        estimar a rigidez da roda a cargas laterais e radiais.
+        """
+
+        if not any(self.active):
+            raise ValueError(
+                "Não há raios tensionados; aperte ao menos um raio antes de "
+                "calcular a rigidez."
+            )
+        matrix = self._assemble_stiffness(self.active, self.tensions_n)
+        return tuple(tuple(row) for row in matrix)
+
+    def point_stiffnesses(
+        self,
+    ) -> tuple[tuple[float, ...], tuple[float, ...]]:
+        """Rigidez radial e lateral em cada nó do aro, em N/mm.
+
+        Aplica 1 N no nó e mede o deslocamento correspondente. O resultado
+        representa a rigidez de ponto da roda montada; não é uma rigidez
+        global de corpo rígido. Raios frouxos não contribuem.
+        """
+
+        count = len(self.geometries)
+        stiffness = [list(row) for row in self.stiffness_matrix()]
+        factor = _cholesky_factor(stiffness)
+        radial: list[float] = []
+        lateral: list[float] = []
+        for index in range(count):
+            radial_load = [0.0] * (2 * count)
+            radial_load[2 * index] = 1.0
+            radial_delta = _cholesky_solve(factor, radial_load)
+            radial.append(_inverse_compliance(radial_delta[2 * index]))
+
+            lateral_load = [0.0] * (2 * count)
+            lateral_load[2 * index + 1] = 1.0
+            lateral_delta = _cholesky_solve(factor, lateral_load)
+            lateral.append(_inverse_compliance(lateral_delta[2 * index + 1]))
+        return tuple(radial), tuple(lateral)
+
     def suggest_adjustments(
         self,
         target_lateral_mm: Sequence[float] | None = None,
@@ -761,6 +804,15 @@ class TruingState:
             self._check_index(index)
             if not math.isfinite(value):
                 raise ValueError("O ajuste deve ser um número finito.")
+
+
+def _inverse_compliance(displacement: float) -> float:
+    """Converte deslocamento (mm/N) em rigidez de ponto (N/mm)."""
+
+    magnitude = abs(displacement)
+    if magnitude < 1e-12:
+        return math.inf
+    return 1.0 / magnitude
 
 
 def _fit_sequence(
